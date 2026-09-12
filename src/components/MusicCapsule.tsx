@@ -122,10 +122,9 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
           const anchorCy = dispCy - cur.y;
           const dX = Math.min(1, Math.max(0, (halfW + bh.r - Math.abs(bh.x - anchorCx)) / halfW));
           const dY = Math.min(1, Math.max(0, (halfH + bh.r - Math.abs(bh.y - anchorCy)) / halfH));
-          // 静摩擦死区：侵入不足 28% 时完全推不动，得先压进去一段
-          const DEAD = 0.28;
-          const kX = Math.max(0, (dX - DEAD) / (1 - DEAD));
-          const kY = Math.max(0, (dY - DEAD) / (1 - DEAD));
+          // 一接触就推：推力随侵入深度渐进，无静摩擦死区
+          const kX = dX;
+          const kY = dY;
           const maxRepX = Math.max(24, halfW * 0.72); // 约为旧上限的 1/3
           const maxRepY = Math.min(halfH * 0.72, 46);
 
