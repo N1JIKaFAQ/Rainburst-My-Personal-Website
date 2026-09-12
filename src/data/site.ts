@@ -195,3 +195,39 @@ export const rockCards: RockCard[] = [
     accent: "#cce0ff",
   },
 ];
+
+/* ------------------------------------------------------------------ */
+/* 背景音乐：主页随机播放 globalTracks，进入「摇滚」板块切换 blueGiantTrack */
+/* 文件放在 public/Music/ 下，file 字段是相对 Music/ 的路径（保留原文件名） */
+
+export interface Track {
+  /** 中文/主标题，胶囊里滚动展示 */ title: string;
+  /** 英文副题 */ titleEn: string;
+  /** 艺术家 */ artist: string;
+  /** 相对 public/Music/ 的文件路径 */ file: string;
+}
+
+/** 主页 ambient 曲池：随机挑一首播放 */
+export const globalTracks: Track[] = [
+  { title: "向晚的丘甸", titleEn: "FIELDS AFTER DUSK", artist: "HOYO-MiX", file: "HOYO-MiX - 向晚的丘甸 Fields After Dusk.mp3" },
+  { title: "地上的仰望", titleEn: "WE CHOOSE THE MOON", artist: "HOYO-MiX", file: "HOYO-MiX - 地上的仰望 We Choose the Moon.mp3" },
+  { title: "失色的流岚", titleEn: "TARNISHED STORM", artist: "HOYO-MiX", file: "HOYO-MiX - 失色的流岚 Tarnished Storm.mp3" },
+  { title: "望月者的心愿", titleEn: "NIN-KIGGIA'S MESSAGE", artist: "HOYO-MiX", file: "HOYO-MiX - 望月者的心愿 Nin-Kiggia‘s Message.mp3" },
+  { title: "游步欣愉", titleEn: "GLADSOME RAMBLE", artist: "HOYO-MiX", file: "HOYO-MiX - 游步欣愉 Gladsome Ramble.mp3" },
+  { title: "滨海拂风", titleEn: "WHIRLING OUT AND OVER", artist: "HOYO-MiX", file: "HOYO-MiX - 滨海拂风 Whirling Out and Over.mp3" },
+  { title: "须臾的舒闲", titleEn: "TRANSIENT TRANQUILITY", artist: "HOYO-MiX", file: "HOYO-MiX - 须臾的舒闲 Transient Tranquility.mp3" },
+];
+
+/** 「摇滚」板块专属：进页淡入、离开淡出并恢复 ambient */
+export const blueGiantTrack: Track = {
+  title: "视界中的嗓音",
+  titleEn: "THE GREAT GIG IN THE SKY",
+  artist: "PINK FLOYD",
+  file: "蓝巨星/Pink Floyd - The Great Gig in the Sky.mp3",
+};
+
+/** 音乐全局参数：默认音量 / 频谱条数 */
+export const audioConfig = {
+  volume: 0.3,
+  bars: 44,
+};

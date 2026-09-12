@@ -2,6 +2,8 @@ import { useCallback, useRef, useState } from "react";
 import CosmosView from "./components/CosmosView";
 import SectionPage from "./components/SectionPage";
 import BlueGiantPage from "./components/BlueGiantPage";
+import MusicCapsule from "./components/MusicCapsule";
+import { music } from "./audio/music";
 import type { Cosmos, CaptureInfo } from "./universe/engine";
 import type { StarDef } from "./data/site";
 
@@ -18,10 +20,13 @@ export default function App() {
   const swallowDone = useCallback((def: StarDef) => {
     setSection(def);
     setView("section");
+    /** 进入「摇滚」板块 → 切换板块专属曲；其余板块保持 ambient */
+    music.switchMode(def.id === "blue-giant" ? "dedicated" : "ambient");
   }, []);
 
   /** 板块页 → 宇宙：反向吞噬（色膜从中心被撑开，点阵涟漪回来） */
   const backToCosmos = useCallback(() => {
+    music.switchMode("ambient");
     setEnter({ mode: "return", color: section?.pageBg ?? "#05060c" });
     setView("cosmos");
     setEpoch((e) => e + 1);
@@ -29,23 +34,30 @@ export default function App() {
 
   const noop = useCallback((_info: CaptureInfo | null) => {}, []);
 
-  if (view === "section" && section) {
-    /** 蓝巨星走黑洞电影页，其余板块保持通用页 */
-    if (section.id === "blue-giant") {
-      return <BlueGiantPage star={section} onBack={backToCosmos} />;
-    }
-    return <SectionPage star={section} onBack={backToCosmos} />;
-  }
+  const onBlueGiant = view === "section" && section?.id === "blue-giant";
 
   return (
-    <CosmosView
-      key={epoch}
-      engineRef={engineRef}
-      enterMode={enter.mode}
-      enterColor={enter.color}
-      onCapture={noop}
-      onSwallowStart={() => {}}
-      onSwallowDone={swallowDone}
-    />
+    <>
+      {view === "section" && section ? (
+        /** 蓝巨星走黑洞电影页，其余板块保持通用页 */
+        onBlueGiant ? (
+          <BlueGiantPage star={section} onBack={backToCosmos} />
+        ) : (
+          <SectionPage star={section} onBack={backToCosmos} />
+        )
+      ) : (
+        <CosmosView
+          key={epoch}
+          engineRef={engineRef}
+          enterMode={enter.mode}
+          enterColor={enter.color}
+          onCapture={noop}
+          onSwallowStart={() => {}}
+          onSwallowDone={swallowDone}
+        />
+      )}
+      {/* 胶囊常驻；蓝巨星页底部有卡片行，挪到顶部居中 */}
+      <MusicCapsule position={onBlueGiant ? "top" : "bottom"} />
+    </>
   );
 }
