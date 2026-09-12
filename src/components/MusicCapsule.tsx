@@ -26,6 +26,8 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
   const dirRef = useRef({ x: 0, y: -1 });
   /** 棘轮行程峰值：只增不减，达到极限后钉住直到黑洞离开 */
   const peakRef = useRef({ x: 0, y: 0 });
+  /** 重物惯性：质量-弹簧-阻尼积分的速度项 */
+  const velRef = useRef({ x: 0, y: 0 });
   const barCount = audioConfig.bars;
   const playingRef = useRef(false);
   playingRef.current = state.playing;
@@ -72,9 +74,12 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const cur = { x: 0, y: 0 };
     let raf = 0;
+    let last = 0;
 
-    const tick = () => {
+    const tick = (now: number) => {
       raf = requestAnimationFrame(tick);
+      const dt = last ? Math.min(1 / 30, Math.max(0.001, (now - last) / 1000)) : 1 / 60;
+      last = now;
       const el = outerRef.current;
       if (!el) return; // 挂载前可能为 null，等下一帧
       const bh = engineRef.current?.getBlackhole();
@@ -112,15 +117,28 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
         }
 
         if (lockedRef.current && !reduced && bh.influence > 0.2 && !bh.swallowing) {
-          // 侵入深度（各轴独立）：贴边=0，压到中心=1
-          const kX = Math.min(1, Math.max(0, (halfW + bh.r - Math.abs(bh.x - dispCx)) / halfW));
-          const kY = Math.min(1, Math.max(0, (halfH + bh.r - Math.abs(bh.y - dispCy)) / halfH));
+          // 侵入深度：相对锚点中心计算（否则胶囊被推走后会自己"躲开"推力，永远到不了极限）
+          const anchorCx = dispCx - cur.x;
+          const anchorCy = dispCy - cur.y;
+          const dX = Math.min(1, Math.max(0, (halfW + bh.r - Math.abs(bh.x - anchorCx)) / halfW));
+          const dY = Math.min(1, Math.max(0, (halfH + bh.r - Math.abs(bh.y - anchorCy)) / halfH));
+          // 静摩擦死区：侵入不足 28% 时完全推不动，得先压进去一段
+          const DEAD = 0.28;
+          const kX = Math.max(0, (dX - DEAD) / (1 - DEAD));
+          const kY = Math.max(0, (dY - DEAD) / (1 - DEAD));
           const maxRepX = Math.max(24, halfW * 0.72); // 约为旧上限的 1/3
           const maxRepY = Math.min(halfH * 0.72, 46);
 
-          // 棘轮：行程只增不减，推到极限后钉住，直到黑洞离开才回弹
-          peakRef.current.x = Math.max(peakRef.current.x, maxRepX * kX);
-          peakRef.current.y = Math.max(peakRef.current.y, maxRepY * kY);
+          // 棘轮缓爬：行程上限以 55px/s 向上爬，重物要一直顶着才到位；只增不减
+          const climb = 55 * dt;
+          peakRef.current.x = Math.max(
+            peakRef.current.x,
+            Math.min(maxRepX * kX, peakRef.current.x + climb)
+          );
+          peakRef.current.y = Math.max(
+            peakRef.current.y,
+            Math.min(maxRepY * kY, peakRef.current.y + climb)
+          );
 
           tx = dirRef.current.x * peakRef.current.x;
           // bottom 态只允许上推、top 态只允许下推（防止被挤出屏幕边缘）
@@ -129,12 +147,30 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
         }
       }
 
-      // 慢弹簧：τ≈0.4s @60fps，推入与回弹都沉
-      cur.x += (tx - cur.x) * 0.045;
-      cur.y += (ty - cur.y) * 0.045;
-      if (Math.abs(cur.x) < 0.01 && Math.abs(cur.y) < 0.01 && tx === 0 && ty === 0) {
+      // 质量-弹簧-阻尼积分：起步迟疑、缓慢加速、临界阻尼不过冲（重物手感）
+      const K = 5.5;
+      const C = 4.7;
+      velRef.current.x += (tx - cur.x) * K * dt;
+      velRef.current.y += (ty - cur.y) * K * dt;
+      const damp = Math.exp(-C * dt);
+      velRef.current.x *= damp;
+      velRef.current.y *= damp;
+      cur.x += velRef.current.x * dt;
+      cur.y += velRef.current.y * dt;
+
+      // 静止判定：目标为 0 且已基本停住时归零，避免无意义写入
+      if (
+        tx === 0 &&
+        ty === 0 &&
+        Math.abs(cur.x) < 0.05 &&
+        Math.abs(cur.y) < 0.05 &&
+        Math.abs(velRef.current.x) < 0.8 &&
+        Math.abs(velRef.current.y) < 0.8
+      ) {
         cur.x = 0;
         cur.y = 0;
+        velRef.current.x = 0;
+        velRef.current.y = 0;
       }
       el.style.transform = `translate(-50%, 0) translate(${cur.x.toFixed(2)}px, ${cur.y.toFixed(2)}px)`;
     };
