@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { music, type MusicState } from "../audio/music";
 import { audioConfig } from "../data/site";
+import { createLiquidGlassFilter } from "../utils/liquidGlass";
+import type { Cosmos } from "../universe/engine";
 
 interface Props {
   /** top：蓝巨星页顶部（避开底部卡片行）；bottom：其余视图 */
   position?: "bottom" | "top";
+  /** 宇宙引擎 ref，用于读取黑洞位置做排斥计算 */
+  engineRef: React.RefObject<Cosmos | null>;
 }
 
 /**
@@ -12,14 +16,104 @@ interface Props {
  * 内部为实时频谱细条（左高右低"山脉"轮廓），歌名居中浮在条上方。
  * 挂在 App，跨视图常驻。
  */
-export default function MusicCapsule({ position = "bottom" }: Props) {
+export default function MusicCapsule({ position = "bottom", engineRef }: Props) {
   const [state, setState] = useState<MusicState>(music.getState());
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const outerRef = useRef<HTMLDivElement>(null);
   const barCount = audioConfig.bars;
   const playingRef = useRef(false);
   playingRef.current = state.playing;
 
   useEffect(() => music.subscribe(setState), []);
+
+  /* ---------- 液态玻璃滤镜（挂载时 + resize 防抖重建） ---------- */
+  useEffect(() => {
+    let t = 0;
+    const apply = () => {
+      const el = outerRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      if (r.width < 40 || r.height < 20) return;
+      try {
+        const filterId = createLiquidGlassFilter({
+          width: r.width,
+          height: r.height,
+          radius: r.height / 2,
+          intensity: 0.5,
+          id: "music-capsule",
+        });
+        el.style.setProperty("--lg-filter", `url(#${filterId}) blur(2px)`);
+      } catch {
+        /* 生成失败 → CSS 自动回退到纯 blur 毛玻璃 */
+      }
+    };
+    const raf = requestAnimationFrame(apply); // 等布局稳定后测尺寸
+    const onResize = () => {
+      window.clearTimeout(t);
+      t = window.setTimeout(apply, 200);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(t);
+      window.removeEventListener("resize", onResize);
+      document.getElementById("music-capsule")?.remove();
+    };
+  }, []);
+
+  /* ---------- 黑洞排斥：椭圆势垒 + 弹簧回位 ---------- */
+  useEffect(() => {
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const cur = { x: 0, y: 0 };
+    let raf = 0;
+
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const el = outerRef.current;
+      if (!el) return; // 挂载前可能为 null，等下一帧
+      const bh = engineRef.current?.getBlackhole();
+      let tx = 0;
+      let ty = 0;
+
+      if (!reduced && bh && bh.influence > 0.2 && !bh.swallowing) {
+        const r = el.getBoundingClientRect();
+        const cx = r.left + r.width / 2 - cur.x; // 虚拟中心（不含当前位移）
+        const cy = r.top + r.height / 2 - cur.y;
+        const dx = cx - bh.x;
+        const dy = cy - bh.y;
+
+        // 势垒半径：横向 = 半宽 + 视界×2.6 + 56；竖向 = 半高 + 视界×2.6 + 96（明显更窄）
+        const maxRepX = Math.max(60, r.width * 0.5 + 60);
+        const maxRepY = Math.min(r.height * 0.5 + 88, 140);
+        const rx = r.width / 2 + bh.r * 2.6 + 56;
+        const ry = r.height / 2 + bh.r * 2.6 + 96;
+
+        const nx = dx / rx;
+        const ny = dy / ry;
+        const e = Math.hypot(nx, ny);
+        if (e < 1 && e > 1e-4) {
+          const push = (1 - e) ** 1.6; // 越近推得越狠
+          // 横向：以黑洞为心，左推右，右推左（黑洞压住中心时胶囊向侧边滑开，让出文字）
+          tx = Math.sign(dx) * Math.min(maxRepX, Math.abs(dx) * push * 2.2);
+          // 竖向：bottom 态只允许上推、top 态只允许下推（防止被挤出屏幕边缘）
+          const rawTy = Math.sign(dy) * Math.min(maxRepY, Math.abs(dy) * push * 1.1);
+          ty = position === "bottom" ? Math.min(0, rawTy) : Math.max(0, rawTy);
+        }
+      }
+
+      // 弹簧平滑（frame-rate 无关的指数趋近）
+      cur.x += (tx - cur.x) * 0.16;
+      cur.y += (ty - cur.y) * 0.16;
+      if (Math.abs(cur.x) < 0.01 && Math.abs(cur.y) < 0.01 && tx === 0 && ty === 0) {
+        cur.x = 0;
+        cur.y = 0;
+      }
+      el.style.transform = `translate(-50%, 0) translate(${cur.x.toFixed(2)}px, ${cur.y.toFixed(2)}px)`;
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [engineRef, position]);
 
   /* ---------- 频谱绘制 ---------- */
   useEffect(() => {
@@ -92,15 +186,26 @@ export default function MusicCapsule({ position = "bottom" }: Props) {
 
   return (
     <div
-      className={`fixed left-1/2 z-50 -translate-x-1/2 ${
+      ref={outerRef}
+      className={`fixed left-1/2 z-50 ${
         /* 窄屏：底部导航会变两行、蓝巨星页 header 占满首行，胶囊上移避让 */
         position === "top" ? "top-20 sm:top-6" : "bottom-24 sm:bottom-6"
       }`}
+      style={{ transform: "translate(-50%, 0)" }}
     >
-      <div className="group relative h-12 w-[min(320px,calc(100vw-3rem))] overflow-hidden rounded-full border border-white/10 bg-black/45 shadow-2xl backdrop-blur-2xl">
-        {/* 内层液态高光 */}
+      <div
+        className="group relative h-12 w-[min(320px,calc(100vw-3rem))] overflow-hidden rounded-full border border-white/15 shadow-[0_8px_32px_rgba(2,4,12,0.35)]"
+        style={{
+          background: "linear-gradient(160deg, rgba(255,255,255,0.10), rgba(255,255,255,0.03) 45%, rgba(143,182,255,0.06))",
+          backdropFilter: "var(--lg-filter, blur(18px)) saturate(1.4) brightness(1.06)",
+          WebkitBackdropFilter: "var(--lg-filter, blur(18px)) saturate(1.4) brightness(1.06)",
+          boxShadow:
+            "inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -1px 0 rgba(255,255,255,0.06), 0 8px 32px rgba(2,4,12,0.35)",
+        }}
+      >
+        {/* 内层高光（镜面反射质感） */}
         <div
-          className="pointer-events-none absolute inset-0 rounded-full opacity-40"
+          className="pointer-events-none absolute inset-0 rounded-full opacity-25"
           style={{
             background:
               "radial-gradient(90px 60px at 20% 8%, rgba(255,255,255,0.20), transparent 60%), radial-gradient(130px 80px at 82% 95%, rgba(143,182,255,0.14), transparent 70%)",
@@ -114,13 +219,12 @@ export default function MusicCapsule({ position = "bottom" }: Props) {
         {center && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
             <span
-              className="max-w-[78%] truncate text-center text-[10px] font-light uppercase tracking-[0.3em] text-white/85"
+              className="max-w-[78%] truncate text-center text-[10px] font-light uppercase tracking-[0.3em] text-white/95"
               style={{
                 padding: "3px 14px",
                 borderRadius: "999px",
-                background:
-                  "radial-gradient(ellipse 100px 46px at center, rgba(3,3,4,0.62), transparent 78%)",
-                textShadow: "0 0 12px rgba(0,0,0,0.85), 0 0 22px rgba(143,182,255,0.30)",
+                textShadow:
+                  "0 1px 10px rgba(4,6,16,0.75), 0 0 22px rgba(143,182,255,0.40)",
               }}
             >
               {center}

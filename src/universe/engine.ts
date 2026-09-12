@@ -589,6 +589,17 @@ export class Cosmos {
     this.layoutStars();
   }
 
+  /** 黑洞只读状态（供播放器胶囊等外部交互读取，每帧轮询不触发重渲染） */
+  getBlackhole(): { x: number; y: number; r: number; influence: number; swallowing: boolean } {
+    return {
+      x: this.mx,
+      y: this.my,
+      r: this.horizonR,
+      influence: this.influence,
+      swallowing: !!this.swallow,
+    };
+  }
+
   /* ------------------------------------------------------------------ 交互 */
 
   /** 入场：intro = 首次打开；return = 从板块页返回 */

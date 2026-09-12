@@ -57,7 +57,7 @@ export default function App() {
         />
       )}
       {/* 胶囊常驻；蓝巨星页底部有卡片行，挪到顶部居中 */}
-      <MusicCapsule position={onBlueGiant ? "top" : "bottom"} />
+      <MusicCapsule position={onBlueGiant ? "top" : "bottom"} engineRef={engineRef} />
     </>
   );
 }
