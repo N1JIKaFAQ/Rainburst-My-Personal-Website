@@ -20,6 +20,12 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
   const [state, setState] = useState<MusicState>(music.getState());
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const outerRef = useRef<HTMLDivElement>(null);
+  /** 黑洞已接触胶囊（带滞回），锁定期间推量钉在极限 */
+  const lockedRef = useRef(false);
+  /** 接触瞬间锁存的推开方向（±1），黑洞穿过去也不翻转 */
+  const dirRef = useRef({ x: 0, y: -1 });
+  /** 棘轮行程峰值：只增不减，达到极限后钉住直到黑洞离开 */
+  const peakRef = useRef({ x: 0, y: 0 });
   const barCount = audioConfig.bars;
   const playingRef = useRef(false);
   playingRef.current = state.playing;
@@ -75,35 +81,57 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
       let tx = 0;
       let ty = 0;
 
-      if (!reduced && bh && bh.influence > 0.2 && !bh.swallowing) {
-        const r = el.getBoundingClientRect();
-        const cx = r.left + r.width / 2 - cur.x; // 虚拟中心（不含当前位移）
-        const cy = r.top + r.height / 2 - cur.y;
-        const dx = cx - bh.x;
-        const dy = cy - bh.y;
+      if (bh) {
+        const r = el.getBoundingClientRect(); // 含当前位移：判定的是"看得见的胶囊"
+        const halfW = r.width / 2;
+        const halfH = r.height / 2;
+        const dispCx = r.left + halfW; // 显示中心
+        const dispCy = r.top + halfH;
 
-        // 势垒半径：横向 = 半宽 + 视界×2.6 + 56；竖向 = 半高 + 视界×2.6 + 96（明显更窄）
-        const maxRepX = Math.max(60, r.width * 0.5 + 60);
-        const maxRepY = Math.min(r.height * 0.5 + 88, 140);
-        const rx = r.width / 2 + bh.r * 2.6 + 56;
-        const ry = r.height / 2 + bh.r * 2.6 + 96;
+        // 圆-矩形最近点距离：gap<0 才算真正接触
+        const qx = Math.max(r.left, Math.min(bh.x, r.right));
+        const qy = Math.max(r.top, Math.min(bh.y, r.bottom));
+        const gap = Math.hypot(bh.x - qx, bh.y - qy) - bh.r;
 
-        const nx = dx / rx;
-        const ny = dy / ry;
-        const e = Math.hypot(nx, ny);
-        if (e < 1 && e > 1e-4) {
-          const push = (1 - e) ** 1.6; // 越近推得越狠
-          // 横向：以黑洞为心，左推右，右推左（黑洞压住中心时胶囊向侧边滑开，让出文字）
-          tx = Math.sign(dx) * Math.min(maxRepX, Math.abs(dx) * push * 2.2);
-          // 竖向：bottom 态只允许上推、top 态只允许下推（防止被挤出屏幕边缘）
-          const rawTy = Math.sign(dy) * Math.min(maxRepY, Math.abs(dy) * push * 1.1);
+        if (gap < 0) {
+          if (!lockedRef.current) {
+            // 初次接触：锁存推开方向（此后不再翻转，黑洞穿过去也保持）
+            lockedRef.current = true;
+            const vdx = dispCx - cur.x - bh.x; // 用虚拟中心定方向，避免被自身位移影响
+            const vdy = dispCy - cur.y - bh.y;
+            dirRef.current.x = vdx !== 0 ? Math.sign(vdx) : (bh.x >= window.innerWidth / 2 ? -1 : 1);
+            dirRef.current.y = vdy !== 0 ? Math.sign(vdy) : -1;
+            peakRef.current.x = 0;
+            peakRef.current.y = 0;
+          }
+        } else if (gap > 16) {
+          // 黑洞彻底移出胶囊（含 16px 滞回）才释放
+          lockedRef.current = false;
+          peakRef.current.x = 0;
+          peakRef.current.y = 0;
+        }
+
+        if (lockedRef.current && !reduced && bh.influence > 0.2 && !bh.swallowing) {
+          // 侵入深度（各轴独立）：贴边=0，压到中心=1
+          const kX = Math.min(1, Math.max(0, (halfW + bh.r - Math.abs(bh.x - dispCx)) / halfW));
+          const kY = Math.min(1, Math.max(0, (halfH + bh.r - Math.abs(bh.y - dispCy)) / halfH));
+          const maxRepX = Math.max(24, halfW * 0.72); // 约为旧上限的 1/3
+          const maxRepY = Math.min(halfH * 0.72, 46);
+
+          // 棘轮：行程只增不减，推到极限后钉住，直到黑洞离开才回弹
+          peakRef.current.x = Math.max(peakRef.current.x, maxRepX * kX);
+          peakRef.current.y = Math.max(peakRef.current.y, maxRepY * kY);
+
+          tx = dirRef.current.x * peakRef.current.x;
+          // bottom 态只允许上推、top 态只允许下推（防止被挤出屏幕边缘）
+          const rawTy = dirRef.current.y * peakRef.current.y;
           ty = position === "bottom" ? Math.min(0, rawTy) : Math.max(0, rawTy);
         }
       }
 
-      // 弹簧平滑（frame-rate 无关的指数趋近）
-      cur.x += (tx - cur.x) * 0.16;
-      cur.y += (ty - cur.y) * 0.16;
+      // 慢弹簧：τ≈0.4s @60fps，推入与回弹都沉
+      cur.x += (tx - cur.x) * 0.045;
+      cur.y += (ty - cur.y) * 0.045;
       if (Math.abs(cur.x) < 0.01 && Math.abs(cur.y) < 0.01 && tx === 0 && ty === 0) {
         cur.x = 0;
         cur.y = 0;
