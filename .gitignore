@@ -5,11 +5,11 @@ node_modules/
 dist/
 dist-selftest/
 
+# Test renders (rebuild with selftest/render-blackhole.mjs)
+selftest/*.png
+
 # Local tool state
 .zcode/
-
-# Local imported version snapshots
-第二版/
 
 # Logs
 *.log

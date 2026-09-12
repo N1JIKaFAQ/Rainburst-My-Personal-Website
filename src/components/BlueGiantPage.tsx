@@ -110,10 +110,10 @@ export default function BlueGiantPage({ star, onBack }: Props) {
                 潮汐撕裂 · ROCHE LOBE OVERFLOW
               </p>
               <h1 className="anim-fade-up delay-2 mt-4 text-[17vw] font-thin leading-[0.9] tracking-[-0.04em] text-white/95 sm:text-[7vw]">
-                摇滚
+                {star.section}
               </h1>
               <p className="anim-fade-up delay-3 mt-3 text-[11px] font-light uppercase tracking-[0.48em] text-white/45">
-                MUSIC & SOUND ARCHIVES · 2026
+                {star.sectionEn} & SOUND ARCHIVES · 2026
               </p>
               <p className="anim-fade-up delay-4 ml-auto mt-7 max-w-[26rem] text-sm font-light leading-relaxed text-white/60 sm:text-base">
                 一颗蓝巨星把自己的大气一层层交给身旁的黑洞。被撕下来的等离子体绕着视界加速到近乎光速，那是宇宙里最响的一段低音。
