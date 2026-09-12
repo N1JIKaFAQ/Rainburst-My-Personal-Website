@@ -8,6 +8,9 @@ dist-selftest/
 # Local tool state
 .zcode/
 
+# Local imported version snapshots
+第二版/
+
 # Logs
 *.log
 npm-debug.log*

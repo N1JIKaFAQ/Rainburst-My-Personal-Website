@@ -1,616 +1,763 @@
 /**
- * BlackholeScene —— 板块页的 WebGL2 黑洞电影引擎（无框架依赖）。
+ * BlackholeScene —— 原生 WebGL2 史瓦西黑洞 + 蓝巨星 + 潮汐吸积流实时光线步进
  *
- * 渲染模型：片元着色器内对每个像素做史瓦西度规下的光线测地线积分
- * （加速度 a = -1.5·h²·r/|r|⁵，rs=1），引力透镜、光子环、吸积盘上下
- * 幻影弧都是积分的自然结果。吸积盘用程序化 fbm 湍流 + 开普勒差分旋转
- * + 多普勒集束着色；蓝巨星本体与潮汐流由 preset 参数驱动，后续板块
- * （红巨星/中子星……）复用同一引擎、换预设即可做出区分。
+ * 构图对照参考图：
+ *  · 蓝巨星是庞然大物：半径 170 单位，星心远在左侧，只看得到球面的一小片、边缘弧度很小；
+ *    表面是云絮状过曝的蓝白湍流，域扭曲让云团翻涌而不是平移；临边有日冕流光与针状体。
+ *  · 黑洞在画面右侧 ~64%，吸积盘倾斜 ~20°（相机滚转），细长的流光从恒星方向穿过黑洞伸向右下。
+ *  · 黑洞阴影不是平面纯黑：极细极亮的光子环贴着阴影边缘（来自被透镜化的盘面光），内部有体积感的深色渐变。
+ *  · 潮汐流：从星面最近点扬起、切向汇入吸积盘的一条贝塞尔发光管，纤维纹理沿流向奔涌，强度随滚动飙升。
+ *  · 滚动推进：相机拉近、盘面刚性旋转 ×8、三个轨道热斑以真实开普勒速度绕行、径向涌入加速、盘面微进动。
  *
- * 交互契约：外部只管 setProgress(0..1)（原始滚动进度），引擎内部做
- * 指数平滑得到运镜；onFrame 回调把平滑进度吐给 React 覆盖层。
+ * 抗锯齿 / 抗摩尔纹（全部在着色器内完成，不依赖 MSAA）：
+ *  · 纹理带限：所有盘面 / 星面噪声的频率都按世界单位设计，并按"像素足迹 ÷ 波长"在奈奎斯特附近淡回均值。
+ *    足迹 = 路程 × 像素张角 ÷ 掠射余弦 × 透镜放大；放大因子由撞击参数到临界值 2.598 的距离估计，
+ *    因此黑洞上方被强透镜的拱弧和光子环处的纹理会自动变柔。
+ *  · 星缘覆盖：巨星轮廓用解析的亚像素覆盖率混合，而不是一像素硬阶跃。
+ *  · 分层超采样：只在黑洞附近做——临界撞击参数 ±0.24 内 8 spp、h0 < 3.7 内 4 spp、其余 1 spp。
+ *  · 视界附近步长更细更平滑（dt = 0.06·r，下限 0.05），阴影边界与光子环不再随步进相位抖动。
+ *
+ * 数值稳健性：所有噪声使用整数哈希；旋转/涌入相位由 JS 用 dt 积分并 wrap 到 2π 后作为 uniform 传入。
  */
 
-export type Vec3 = [number, number, number];
-
-export interface CamKey {
-  /** 该关键帧对应的滚动进度 */ p: number;
-  pos: Vec3;
-  tgt: Vec3;
-  /** tan(fov/2) */ fov: number;
+export interface BlackholeCallbacks {
+  onProgress?: (progress: number) => void;
 }
 
-export interface BlackholePreset {
-  /** 吸积盘内缘色（炽热） */ diskInner: Vec3;
-  /** 吸积盘外缘色 */ diskOuter: Vec3;
-  /** 恒星表面色 */ starColor: Vec3;
-  starPos: Vec3;
-  starRadius: number;
-  /** 相机运镜关键帧（进度单调递增） */ camKeys: CamKey[];
-  exposure: number;
-}
+const TAU = Math.PI * 2;
+/** 三个轨道热斑的半径（与着色器内 kr 一致），用于 JS 侧按开普勒角速度积分相位 */
+const KNOT_RADII = [2.85, 3.6, 4.9];
 
-export interface BlackholeSceneOptions {
-  /** 平滑后的进度，供 DOM 覆盖层同步 */ onFrame?: (progress: number) => void;
-  coarse?: boolean;
-}
-
-/* ---------------- 蓝巨星预设：蓝色吸积盘 · 低角度终局特写 ---------------- */
-
-function hexRgb(hex: string): Vec3 {
-  const h = hex.replace("#", "");
-  return [
-    parseInt(h.slice(0, 2), 16) / 255,
-    parseInt(h.slice(2, 4), 16) / 255,
-    parseInt(h.slice(4, 6), 16) / 255,
-  ];
-}
-
-export function presetFromStar(def: {
-  color: string;
-  core: string;
-}): BlackholePreset {
-  const inner = hexRgb(def.core); // 内缘蓝白炽热
-  const outer = hexRgb(def.color); // 外缘深蓝（提饱和、压亮度）
-  return {
-    diskInner: [inner[0], inner[1], inner[2]],
-    diskOuter: [outer[0] * 0.45, outer[1] * 0.6, outer[2] * 1.05],
-    starColor: hexRgb(def.color),
-    starPos: [-13.5, 4.0, 1.5],
-    starRadius: 6.2,
-    camKeys: [
-      { p: 0.0, pos: [3.5, 15.0, 27.0], tgt: [0, 0.5, 0], fov: 0.62 },
-      { p: 0.28, pos: [1.5, 7.5, 18.5], tgt: [0, 0.2, 0], fov: 0.58 },
-      { p: 0.55, pos: [1.2, 3.2, 14.0], tgt: [-0.6, 0.4, 0], fov: 0.58 },
-      { p: 1.0, pos: [1.4, 2.4, 12.8], tgt: [-0.9, 0.25, 0], fov: 0.56 },
-    ],
-    exposure: 1.02,
-  };
-}
-
-/* ---------------- GLSL ---------------- */
-
-const VERT = `#version 300 es
+const VERT_SHADER = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
 void main() {
-  vec2 v = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-  gl_Position = vec4(v * 2.0 - 1.0, 0.0, 1.0);
-}`;
+  v_uv = a_pos;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+`;
 
-const FRAG = `#version 300 es
+const FRAG_SHADER = `#version 300 es
 precision highp float;
-out vec4 O;
+precision highp int;
 
-uniform vec2  uRes;
-uniform float uTime;
-uniform float uProgress;
-uniform vec3  uCamPos;
-uniform vec3  uCamRight;
-uniform vec3  uCamUp;
-uniform vec3  uCamFwd;
-uniform float uFovTan;
-uniform vec3  uDiskInner;
-uniform vec3  uDiskOuter;
-uniform vec3  uStarColor;
-uniform vec3  uStarPos;
-uniform vec3  uStretchAxis;
-uniform float uStarRadius;
-uniform float uStretch;
-uniform float uStream;
-uniform float uSpin;
-uniform float uDiskBright;
-uniform float uFlash;
-uniform float uStarTh;
-uniform float uExposure;
-uniform int   uSteps;
+in vec2 v_uv;
+out vec4 fragColor;
 
-const float RS   = 1.0;
-const float DIN  = 2.6;
-const float DOUT = 11.0;
+uniform vec2  u_resolution;
+uniform float u_time;
+uniform float u_progress;
+uniform vec2  u_mouse;
+uniform float u_spin;     // 盘面刚性旋转相位（JS 积分，wrap 2π）
+uniform float u_flow;     // 径向涌入纹理位移（JS 积分）
+uniform vec3  u_knots;    // 三个轨道热斑的开普勒相位（JS 积分，wrap 2π）
+uniform float u_stream;   // 潮汐流沿流向的纹理位移（JS 积分）
 
-float hash12(vec2 p) {
-  vec3 q = fract(vec3(p.xyx) * 0.1031);
-  q += dot(q, q.yzx + 33.33);
-  return fract((q.x + q.y) * q.z);
+const float Rs     = 1.0;      // 史瓦西半径
+const float R_IN   = 2.3;      // 吸积盘内缘
+const float R_OUT  = 11.0;     // 吸积盘外缘（朝恒星一侧伸出窄舌）
+const float H_CRIT = 2.598;    // 临界撞击参数 3√3/2·Rs：小于它的光线全部落入视界
+
+// 蓝巨星：半径 170，星心远在左后方；星面最近点 S0 距黑洞 ~20 单位
+const vec3  STAR_C   = vec3(-189.13, 10.67, 14.33);
+const float STAR_R   = 170.0;
+const vec3  STAR_DIR = vec3(0.99554, -0.05616, -0.07540);  // 星心 → 黑洞
+const float STAR_PHI = 3.0660;                              // 恒星在盘面坐标中的方位角
+// 潮汐流：星面最近点 S0 → 扬起的控制点 SM → 切向汇入盘面 S1
+const vec3  S0 = vec3(-19.89, 1.12, 1.51);
+const vec3  SM = vec3(-16.80, 2.20, 3.10);
+const vec3  S1 = vec3(-13.76, 0.00, 1.04);
+
+// 亚像素采样图案（D3D 标准 4x / 8x，单位：像素）
+const vec2 OFF4[4] = vec2[4](
+  vec2(-0.125, -0.375), vec2(0.375, -0.125), vec2(-0.375, 0.125), vec2(0.125, 0.375));
+const vec2 OFF8[8] = vec2[8](
+  vec2(0.0625, -0.1875), vec2(-0.0625, 0.1875), vec2(0.3125, 0.0625), vec2(-0.1875, -0.3125),
+  vec2(-0.3125, 0.3125), vec2(-0.4375, -0.0625), vec2(0.1875, 0.4375), vec2(0.4375, -0.4375));
+
+/* ---------------- 整数哈希与噪声 ---------------- */
+uint uhash(uint n) {
+  n ^= n >> 16u; n *= 0x7feb352du;
+  n ^= n >> 15u; n *= 0x846ca68bu;
+  n ^= n >> 16u;
+  return n;
 }
-float hash13(vec3 q) {
-  q = fract(q * 0.1031);
-  q += dot(q, q.zyx + 31.32);
-  return fract((q.x + q.y) * q.z);
+float hash2i(ivec2 p) {
+  uint h = uhash((uint(p.x) * 0x9E3779B1u) ^ uhash(uint(p.y) + 0x68E31DA4u));
+  return float(h) * (1.0 / 4294967296.0);
 }
-vec3 hash33(vec3 q) {
-  q = fract(q * vec3(0.1031, 0.1030, 0.0973));
-  q += dot(q, q.yxz + 33.33);
-  return fract((q.xxy + q.yxx) * q.zyx);
+float hash3i(ivec3 p) {
+  uint h = uhash((uint(p.x) * 0x9E3779B1u) ^ uhash((uint(p.y) * 0x85EBCA77u) ^ uhash(uint(p.z) + 0x68E31DA4u)));
+  return float(h) * (1.0 / 4294967296.0);
 }
-float noise2(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), f.x),
-             mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), f.x), f.y);
+float noise2D(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  ivec2 c = ivec2(i);
+  return mix(mix(hash2i(c), hash2i(c + ivec2(1, 0)), u.x),
+             mix(hash2i(c + ivec2(0, 1)), hash2i(c + ivec2(1, 1)), u.x), u.y);
 }
-float fbm(vec2 p) {
-  float a = 0.5, s = 0.0;
-  for (int i = 0; i < 5; i++) {
-    s += a * noise2(p);
-    p = p * 2.03 + vec2(13.7, 7.1);
+float noise3D(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = p - i;
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  ivec3 c = ivec3(i);
+  float n000 = hash3i(c);
+  float n100 = hash3i(c + ivec3(1, 0, 0));
+  float n010 = hash3i(c + ivec3(0, 1, 0));
+  float n110 = hash3i(c + ivec3(1, 1, 0));
+  float n001 = hash3i(c + ivec3(0, 0, 1));
+  float n101 = hash3i(c + ivec3(1, 0, 1));
+  float n011 = hash3i(c + ivec3(0, 1, 1));
+  float n111 = hash3i(c + ivec3(1, 1, 1));
+  float nx00 = mix(n000, n100, u.x);
+  float nx10 = mix(n010, n110, u.x);
+  float nx01 = mix(n001, n101, u.x);
+  float nx11 = mix(n011, n111, u.x);
+  return mix(mix(nx00, nx10, u.y), mix(nx01, nx11, u.y), u.z);
+}
+float fbm2D(vec2 p) {
+  float v = 0.0;
+  float a = 0.55;
+  mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+  for (int i = 0; i < 4; i++) {
+    v += a * noise2D(p);
+    p = rot * p * 2.05;
     a *= 0.5;
   }
-  return s;
+  return v;
+}
+// 带限：x = 像素足迹（单位：噪声 cell）。值噪声的基波周期约 2 cell，
+// 宽为 x 的盒滤波对它的衰减 ≈ sinc(x/2)：x=1 时剩 64%，x≈1.8 时归零。
+// 用 smoothstep(0.5, 1.7) 近似这条曲线：既不摩尔纹，也不会比真实超采样更糊。
+float lodFade(float x) {
+  return 1.0 - smoothstep(0.5, 1.7, x);
+}
+float fbm3Dlod(vec3 p, float x) {
+  float v = 0.0;
+  float a = 0.55;
+  for (int i = 0; i < 3; i++) {
+    float f = lodFade(x);
+    v += a * (f > 0.002 ? mix(0.5, noise3D(p), f) : 0.5);
+    p = p * 2.03 + vec3(11.3, 7.1, 3.9);
+    a *= 0.5;
+    x *= 2.03;
+  }
+  return v;
+}
+float fbm3D(vec3 p) {
+  return fbm3Dlod(p, 0.0);
 }
 
-/* 深空：底色 + 微星云 + 两层点星（引力透镜会自动扭曲这里的采样方向） */
-vec3 background(vec3 rd) {
-  vec3 col = vec3(0.006, 0.008, 0.014);
-  float neb = fbm(rd.xy * 2.3 + vec2(rd.z * 1.7, rd.z * -1.3));
-  col += vec3(0.020, 0.032, 0.065) * neb * neb;
-  col += vec3(0.012, 0.008, 0.024) * fbm(rd.zy * 1.9 - vec2(rd.x, 0.0));
-  for (int L = 0; L < 2; L++) {
-    float sc = L == 0 ? 34.0 : 76.0;
-    vec3 id = floor(rd * sc), f = fract(rd * sc) - 0.5;
-    vec3 h = hash33(id) - 0.5;
-    float d = length(f - h * 0.72);
-    float m = hash13(id + 9.1);
-    float star = smoothstep(0.16, 0.0, d) * step(0.965, m);
-    float tw = 0.75 + 0.25 * sin(uTime * (1.2 + m * 2.0) + m * 40.0);
-    vec3 tint = mix(vec3(0.75, 0.83, 1.0), vec3(1.0, 0.92, 0.82), step(0.5, hash13(id + 3.3)));
-    col += tint * star * tw * (L == 0 ? 0.9 : 0.45);
+/* ---------------- 背景 ---------------- */
+vec3 sampleStars(vec3 dir) {
+  vec3 c = vec3(0.006, 0.009, 0.018);
+  float neb = fbm2D(dir.xy * 2.4 + dir.z * 1.2);
+  c += vec3(0.02, 0.035, 0.07) * neb * neb;
+  vec3 g = dir * 280.0;
+  ivec3 cell = ivec3(floor(g));
+  float h = hash3i(cell);
+  if (h > 0.986) {
+    // 圆点星而不是方块：在格子内随机落点 + 高斯衰减
+    vec3 jit = 0.35 + 0.3 * vec3(hash3i(cell + ivec3(17, 0, 0)), hash3i(cell + ivec3(0, 29, 0)), hash3i(cell + ivec3(0, 0, 43)));
+    vec3 d = g - (vec3(cell) + jit);
+    float spot = exp(-dot(d, d) * 12.0);
+    float b = pow((h - 0.986) / 0.014, 6.0) * 2.4;
+    c += mix(vec3(0.7, 0.85, 1.0), vec3(1.0, 0.94, 0.85), fract(h * 37.0)) * b * spot;
+  }
+  return c;
+}
+
+/* ---------------- 蓝巨星 ---------------- */
+// 云絮状、过曝的蓝白湍流表面；域扭曲让云团翻涌，靠近黑洞的一片被潮汐拉出丝状条纹。
+// fp = 像素在星面上的足迹（世界单位），用于纹理带限。
+vec3 shadeStar(vec3 hit, vec3 nGeo, float mu, float p, float fp) {
+  float t = u_time;
+  // 整颗星缓慢自转（只旋转纹理坐标；几何法线 nGeo 用于临边）
+  float ra = t * 0.006;
+  vec3 n = vec3(nGeo.x * cos(ra) - nGeo.z * sin(ra), nGeo.y, nGeo.x * sin(ra) + nGeo.z * cos(ra));
+  float wa = noise3D(n * 5.0 + vec3(t * 0.08, 0.0, 0.0));
+  float wb = noise3D(n * 5.0 + vec3(0.0, t * 0.07, 7.7));
+  vec3 w = vec3(wa, wb, wa * wb) * 0.55;
+  // n 空间频率 f 对应星面波长 STAR_R/f
+  float c1 = fbm3Dlod(n * 9.3 + w + vec3(t * 0.02), fp * (9.3 / STAR_R));
+  float c2 = fbm3Dlod(n * 25.0 + w * 1.6 - vec3(0.0, t * 0.05, 0.0), fp * (25.0 / STAR_R));
+  float c3 = mix(0.5, noise3D(n * 62.0 + vec3(t * 0.35)), lodFade(fp * (62.0 / STAR_R)));
+  float cloud = smoothstep(0.30, 0.72, c1 * 0.55 + c2 * 0.32 + c3 * 0.13);
+
+  // 被撕扯的那片星面：云层被剥走（更蓝），露出朝黑洞方向的拉丝
+  vec3 rel = hit - S0;
+  float pull = exp(-dot(rel, rel) / 110.0) * (0.55 + 0.45 * p);
+  cloud *= 1.0 - 0.55 * pull;
+  float streak = mix(0.5, noise3D(vec3(rel.x * 0.55 - u_stream * 0.45, rel.y * 1.8, rel.z * 1.8)), lodFade(fp * 1.8));
+  float pulse = 0.86 + 0.28 * mix(0.5, noise3D(n * 14.0 + vec3(0.0, 0.0, t * 0.3)), lodFade(fp * (14.0 / STAR_R)));
+
+  vec3 col = mix(vec3(0.30, 0.58, 1.0), vec3(1.0), cloud) * (1.7 + 0.7 * cloud) * pulse;
+  col *= 1.0 + pull * (0.15 + 0.7 * smoothstep(0.42, 0.8, streak));
+  // 临边：柔和晕成蓝白光，而不是一道台阶
+  col = mix(col, vec3(0.60, 0.80, 1.0) * 1.2, pow(1.0 - mu, 1.5) * 0.8);
+  return col * (1.0 + 0.10 * p);
+}
+
+// 未击中星体的光线：宽气辉 + 日冕流光 + 临边针状体（朝黑洞一侧被潮汐拉长）
+vec3 starAtmosphere(vec3 ro, vec3 rd, float p, float pixA) {
+  vec3 oc = ro - STAR_C;
+  float b = dot(oc, rd);
+  vec3 cp = oc - b * rd;
+  float dmin = (b > 0.0) ? length(oc) : length(cp);
+  float gap = max(0.0, dmin - STAR_R);
+  float h = 0.8 * exp(-gap / 7.0) + 0.35 * exp(-gap / 28.0);
+  vec3 col = vec3(0.55, 0.75, 1.0) * h * 0.95;
+  if (b < 0.0 && gap < 60.0) {
+    vec3 nl = cp / max(dmin, 1e-3);
+    float toward = max(0.0, dot(nl, STAR_DIR));
+    // 日冕流光：慢速演化的尖刺状射线，朝黑洞一侧被潮汐拉长
+    float s1 = fbm3Dlod(nl * 11.0 + vec3(u_time * 0.02, 0.0, 0.0), pixA * 11.0);
+    float spiky = pow(s1, 2.6);
+    float L1 = 9.0 + 24.0 * toward * toward;
+    col += vec3(0.55, 0.78, 1.0) * spiky * exp(-gap / L1) * (0.9 + 0.6 * toward * p);
+    // 针状体 / 日珥：贴着临边的短刺，快速闪动
+    float s2 = mix(0.5, noise3D(nl * 30.0 + vec3(0.0, u_time * 0.25, 0.0)), lodFade(pixA * 30.0));
+    col += vec3(0.82, 0.92, 1.0) * pow(s2, 3.0) * exp(-gap / 5.0) * 1.2;
   }
   return col;
 }
 
-/* 蓝巨星：沿"指向黑洞"的轴做拉伸后做球测试（潮汐水滴形），直线求交即可
-   （恒星离黑洞足够远时测地线弯曲量可忽略；靠近时它已被拉伸成流） */
-vec3 shadeStar(vec3 ro, vec3 rd, out float tHit) {
-  tHit = -1.0;
-  if (uStarRadius < 0.02) return vec3(0.0);
-  float k = max(uStretch, 1.0);
-  vec3 oc = ro - uStarPos;
-  float a0 = dot(oc, uStretchAxis);
-  vec3 q0 = oc - uStretchAxis * a0 * (1.0 - 1.0 / k);
-  vec3 rA = rd - uStretchAxis * dot(rd, uStretchAxis) * (1.0 - 1.0 / k);
-  float A = dot(rA, rA);
-  float B = 2.0 * dot(q0, rA);
-  float C = dot(q0, q0) - uStarRadius * uStarRadius;
-  float disc = B * B - 4.0 * A * C;
-  if (disc < 0.0 || A < 1e-6) return vec3(0.0);
-  float t = (-B - sqrt(disc)) / (2.0 * A);
-  if (t < 0.0) return vec3(0.0);
-  tHit = t;
-  vec3 hit = ro + rd * t;
-  vec3 oc2 = hit - uStarPos;
-  float al = dot(oc2, uStretchAxis);
-  vec3 n = normalize(oc2 - uStretchAxis * al * (1.0 - 1.0 / (k * k)) + vec3(1e-4));
-  float lim = clamp(dot(n, -rd), 0.0, 1.0);
-  float limb = 0.34 + 0.66 * pow(lim, 0.55);
-  float gran = fbm(n.xy * 8.0 + n.z * 6.0 + uTime * 0.08);
-  float veins = fbm(n.zy * 15.0 - n.x * 8.0 + uTime * 0.05);
-  float cells = fbm(n.xz * 11.0 + uTime * 0.04);
-  float pulse = 0.97 + 0.03 * sin(uTime * 1.16);
-  /* 冰蓝白球体：整体高亮，gran 调制明暗形成满布纹理的发光巨物表面 */
-  vec3 ice = vec3(0.74, 0.85, 1.0);
-  vec3 base = uStarColor * 1.7 + ice * 0.5;
-  vec3 surf = base * (0.55 + 1.05 * gran)
-            + ice * pow(veins, 2.6) * 1.15
-            + vec3(0.22, 0.34, 0.66) * pow(1.0 - gran, 2.0) * 0.5
-            + uStarColor * cells * 0.3;
-  vec3 col = surf * limb * pulse;
-  col += uStarColor * pow(1.0 - lim, 2.2) * 2.1; /* 亮蓝临边辉光 */
-  /* 朝向黑洞一侧的物质被剥离 → 偏亮偏白的吸积尾迹 */
-  vec3 toBH = normalize(-uStarPos);
-  float tail = clamp(dot(n, toBH), 0.0, 1.0);
-  col += ice * pow(tail, 2.4) * (0.4 + gran) * 1.1;
-  return col;
+/* ---------------- 潮汐流：贝塞尔发光管，沿逃逸直线解析采样 ---------------- */
+vec3 bez(float t) {
+  float u = 1.0 - t;
+  return u * u * S0 + 2.0 * u * t * SM + t * t * S1;
+}
+vec3 streamGlow(vec3 ro, vec3 rd, float inflow) {
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < 6; i++) {
+    float t = (float(i) + 0.5) / 6.0;
+    vec3 P = bez(t);
+    float s = dot(P - ro, rd);
+    if (s <= 0.0) continue;
+    vec3 Q = ro + rd * s;
+    vec3 dq = Q - P;
+    float d2 = dot(dq, dq);
+    float rad = mix(2.8, 0.9, t);
+    float core = exp(-d2 / (rad * rad));
+    float halo = exp(-d2 / (rad * rad * 6.0)) * 0.22;
+    if (core + halo < 0.003) continue;
+    float n = noise3D(vec3(Q.x * 0.9 - u_stream, Q.y * 2.6, Q.z * 2.6));
+    float fib = smoothstep(0.30, 0.74, n);
+    float dens = (core * (0.2 + 0.8 * fib) + halo) * (0.3 + 0.7 * inflow);
+    vec3 c = mix(vec3(0.60, 0.82, 1.0), vec3(0.96, 0.98, 1.0), t * 0.45 + fib * 0.45);
+    acc += c * dens;
+  }
+  return acc * 0.55;
 }
 
-/* 吸积盘单次盘面穿越采样 */
-vec4 diskSample(vec3 cp, vec3 dir) {
-  float rr = length(cp.xz);
-  float band = smoothstep(DIN, DIN + 0.55, rr) * smoothstep(DOUT, DOUT - 3.2, rr);
-  if (band <= 0.0) return vec4(0.0);
-  float th = atan(cp.z, cp.x);
-  float om = 6.0 / (rr * sqrt(rr)) * uSpin; /* 开普勒差分旋转（随黑洞加速而提速） */
-  float den = pow(fbm(vec2(rr * 1.9, (th + uTime * om) * 2.6)), 1.6) * 1.5 + 0.12;
-  /* 自转拉到极高时条纹被扫成高速流带 */
-  den = mix(den, fbm(vec2(rr * 1.4, uTime * 2.0)) * 0.8 + 0.3, clamp((uSpin - 2.0) / 5.5, 0.0, 1.0) * 0.5);
-
-  /* 潮汐流：从恒星方位向内缠绕的对数螺旋臂，强度随滚动进度变化 */
-  if (uStream > 0.004) {
-    float spiral = uStarTh + 10.5 * log(max(rr, 2.0) / 3.4);
-    float dth = atan(sin(th - spiral), cos(th - spiral));
-    float arm = exp(-dth * dth * 6.0) * smoothstep(DOUT + 0.5, DIN + 0.8, rr);
-    float knots = 0.5 + 1.0 * fbm(vec2(rr * 3.4 - uTime * 1.5, spiral * 2.2));
-    den += arm * knots * uStream * 3.2 * band;
+/* ---------------- 吸积盘（盘面坐标系：y=0 平面） ----------------
+ * fp = 像素在盘面上的足迹（世界单位，已含掠射拉伸与透镜放大）。
+ * 所有纹理频率按世界单位设计：径向 cell 数/单位 = (A·k + B)/ρ（圆周嵌入半径 A、螺旋系数 k、log 径向系数 B）
+ */
+vec4 diskShade(vec3 hp, vec3 velD, float p, float diskGain, float inflow, float fp) {
+  float rho = length(hp.xz);
+  float phi = atan(hp.z, hp.x);
+  float starSide = 0.5 + 0.5 * cos(phi - STAR_PHI);    // 1 = 正对恒星
+  float tongue = starSide * starSide;
+  tongue *= tongue;
+  float rOut = R_OUT * (1.0 + 0.42 * tongue);
+  if (rho < R_IN) return vec4(0.0);
+  if (rho > rOut) {
+    // 盘外很淡很宽的散射光带（参考图右侧那条柔和的亮带）
+    float halo = 0.06 * (1.0 - smoothstep(rOut, rOut + 12.0, rho)) * (0.6 + 0.4 * p);
+    return vec4(vec3(0.30, 0.50, 0.95) * halo * diskGain, halo * 0.5);
   }
 
-  float temp = clamp(pow(DIN / rr, 1.35), 0.0, 1.0);
-  vec3 col = mix(uDiskOuter * 1.35, uDiskInner, temp) * (0.45 + 1.5 * temp);
+  float invR = 1.0 / rho;
+  float lr = log(rho);
+  float rp = phi + u_spin;                    // 刚性旋转（物质沿 -φ 运动）
 
-  /* 多普勒集束：迎面一侧更亮更冷白（指数温和，防过曝成灰） */
-  float beta = sqrt(0.5 / max(rr, 1.2));
-  vec3 tang = normalize(vec3(-cp.z, 0.0, cp.x));
-  float dop = 1.0 + beta * 1.25 * dot(tang, -normalize(dir));
-  col *= pow(clamp(dop, 0.45, 2.2), 2.3);
-  col = mix(col, col * vec3(0.88, 0.95, 1.14), clamp(dop - 1.0, 0.0, 1.0));
+  // 湍流：径向基波长 0.8，三层八度各自带限
+  float turb = fbm3Dlod(vec3(cos(rp) * 2.4, sin(rp) * 2.4, rho * 1.25 - u_flow * 0.45), fp * 1.25);
+  // 纤维：沿螺旋拉长的细流。径向 cell 率 = |(1.6·1.2, 4.0)|/ρ = 4.44/ρ（ρ=3 时周期 ≈1.35 单位），方位向拉得很长
+  float uf = rp + 1.2 * lr;
+  float fiber = mix(0.5, noise3D(vec3(cos(uf) * 1.6, sin(uf) * 1.6, lr * 4.0 + u_flow * 0.8)), lodFade(fp * 4.44 * invR));
+  float lanes = 0.07 + 0.93 * smoothstep(0.28, 0.78, fiber);   // 暗纹理带：高亮下依然看得见结构
+  // 螺旋臂：很低频，无需带限
+  float spiral = 0.5 + 0.5 * sin(3.0 * (rp + 1.8 * lr));
+  // 径向涌入条纹：径向 cell 率 = |(2.2·0.9/ρ, 1.2)|
+  float ur = rp + 0.9 * lr;
+  float rushRate = sqrt(3.92 * invR * invR + 1.44);
+  float rush = mix(0.5, noise3D(vec3(cos(ur) * 2.2, sin(ur) * 2.2, rho * 1.2 + u_flow * 2.2)), lodFade(fp * rushRate));
+  float feed = 1.0 + (0.35 + 0.9 * inflow) * starSide;
+  float edgeIn = smoothstep(R_IN, R_IN + max(0.35, fp), rho);
+  float edgeOut = 1.0 - smoothstep(rOut - 2.4, rOut, rho);
+  float density = edgeIn * edgeOut * lanes
+                * (0.34 + 0.5 * turb + 0.16 * spiral + 0.3 * rush * inflow * starSide) * feed;
 
-  /* 引力红移造成的内缘衰减 */
-  col *= clamp(sqrt(1.0 - 1.0 / max(rr, 1.05)), 0.0, 1.0) * 0.9 + 0.1;
+  // 三个轨道热斑：真实开普勒角速度（相位由 JS 积分）。高斯核按像素足迹预滤波（宽度卷积、能量守恒）
+  float knots = 0.0;
+  vec3 kr = vec3(2.85, 3.6, 4.9);
+  vec3 kw = vec3(0.16, 0.20, 0.25);
+  vec3 kd = vec3(0.20, 0.26, 0.34);
+  vec3 kb = vec3(1.6, 1.2, 0.9);
+  float fpA = fp * invR;
+  for (int i = 0; i < 3; i++) {
+    float ad = phi + u_knots[i];
+    ad = atan(sin(ad), cos(ad));
+    // 盒滤波（宽 fp）与高斯核卷积：方差相加，盒的方差为 fp²/12
+    float kdE = sqrt(kd[i] * kd[i] + fp * fp * 0.0833);
+    float kwE = sqrt(kw[i] * kw[i] + fpA * fpA * 0.0833);
+    float dr = rho - kr[i];
+    float radial = exp(-(dr * dr) / (kdE * kdE)) * (kd[i] / kdE);
+    float k = exp(-(ad * ad) / (kwE * kwE)) * (kw[i] / kwE) * radial;
+    k += 0.35 * exp(-max(0.0, ad) / 0.7) * radial * step(0.0, ad);
+    knots += k * kb[i];
+  }
+  knots *= (0.35 + 0.65 * p) * edgeIn;
 
-  float alpha = clamp(den * band, 0.0, 1.0);
-  return vec4(col * den * uDiskBright, alpha);
+  // 相对论多普勒集束：物质朝观察者运动的一侧（左、朝向恒星）更亮更白
+  vec3 orbDir = normalize(vec3(hp.z, 0.0, -hp.x));
+  float vlos = dot(-velD, orbDir);
+  float beta = clamp(sqrt(0.5 / rho) * (0.9 + 0.3 * p), 0.0, 0.75);
+  float gamma = 1.0 / sqrt(1.0 - beta * beta);
+  float dop = 1.0 / (gamma * (1.0 - beta * vlos));
+  float beam = pow(clamp(dop, 0.7, 1.6), 2.0);
+
+  float temp = 1.0 - smoothstep(R_IN, rOut, rho);
+  vec3 cold = vec3(0.20, 0.38, 0.85);
+  vec3 mid  = vec3(0.55, 0.78, 1.00);
+  vec3 hot  = vec3(0.97, 0.99, 1.00);
+  vec3 dc = mix(cold, mix(mid, hot, smoothstep(0.35, 0.95, temp)), temp);
+  dc = mix(dc, hot, clamp((beam - 1.0) * 0.6, 0.0, 1.0));
+  float flick = 1.0 + 0.08 * sin(u_time * 6.3 + rho * 5.0) * (1.0 - smoothstep(R_IN, 4.0, rho)) * lodFade(fp * 0.8);
+  vec3 rgb = dc * beam * diskGain * flick * (density + knots) * 0.85;
+  float da = clamp((density + knots * 0.6) * 0.85, 0.0, 0.96);
+  return vec4(rgb, da);
+}
+
+float easeInOutCubic(float t) {
+  return t < 0.5 ? 4.0 * t * t * t : 1.0 - pow(-2.0 * t + 2.0, 3.0) * 0.5;
+}
+// 弱场透镜方程给出的径向去放大：dβ/dθ ≈ 1 + (α/θ)·(D_ls/D) ≈ 1 + L·α/h0
+float lensMag(vec3 vel, vec3 rayDir, float L, float h0) {
+  float a = acos(clamp(dot(vel, rayDir), -1.0, 1.0));
+  return min(12.0, 1.0 + L * a / max(h0, 0.5));
+}
+vec3 aces(vec3 c) {
+  return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
+}
+
+/* ---------------- 单条光线：测地线积分 → 盘面 / 潮汐流 / 巨星 / 大气 / 星空 ---------------- */
+vec4 traceSample(vec3 camPos, vec3 rayDir, float p, float pixAng) {
+  float spinDrag = 0.32 * p;                 // 伪参考系拖曳
+  float diskGain = 1.1 + 0.55 * p;
+  float inflow   = p;
+  // 盘面微进动：绕 x 轴缓慢摆动 ±2°，透镜拱弧随之呼吸
+  float tilt = 0.02 * sin(u_time * 0.23) + 0.015 * sin(u_time * 0.41 + 1.0);
+  float ct = cos(tilt);
+  float st = sin(tilt);
+
+  // 撞击参数（测地线守恒量）
+  float h0 = length(cross(camPos, rayDir));
+  // 透镜造成的径向拉伸（源面足迹倍率）≈ 1 + L·α/h0：α = 光线到目前为止累计的偏折角，
+  // L = 越过近心点之后走过的路程。没弯过的光线（近侧盘面、恒星大部分）倍率恒为 1；
+  // 越过黑洞落到远侧盘面的拱弧、绕行的光子环像才会被判定为强拉伸并相应放宽纹理带限。
+  float sPast = 0.0;
+
+  vec3 pos = camPos;
+  vec3 vel = rayDir;
+  vec3 col = vec3(0.0);
+  float alpha = 0.0;
+  bool horizon = false;
+  float r = length(pos);
+  float yA = pos.y * ct - pos.z * st;
+
+  const int MAX_STEPS = 140;
+  for (int i = 0; i < MAX_STEPS; i++) {
+    r = length(pos);
+
+    /* 1 · 事件视界：内部是有体积的深色渐变，掠射进入的光线在内缘留下一道柔和亮边 */
+    if (r < Rs * 1.03) {
+      horizon = true;
+      float graze = 1.0 - abs(dot(pos / r, vel));
+      vec3 inner = mix(vec3(0.004, 0.007, 0.014), vec3(0.02, 0.035, 0.07), graze);
+      inner += vec3(0.6, 0.78, 1.0) * pow(graze, 8.0) * 0.5;
+      col += (1.0 - alpha) * inner;
+      alpha = 1.0;
+      break;
+    }
+
+    // 步长随 r 平滑变化，视界附近最细；不再在 r=2.6 处跳变
+    float dt = clamp(0.06 * r, 0.05, 0.6);
+
+    /* 2 · 光子环补光：环的主亮度来自被透镜化的盘面光，这里只给绕行光线一点随自转流动的微光（按步长积分） */
+    float pd = r - 1.5 * Rs;
+    float tang = 1.0 - abs(dot(pos / r, vel));
+    float ring = exp(-pd * pd * 200.0) * tang * tang;
+    ring *= 0.85 + 0.25 * sin(pos.x * 4.0 + pos.z * 3.0 + u_spin * 3.0);
+    col += (1.0 - alpha) * vec3(0.88, 0.94, 1.0) * ring * 0.33 * dt * (0.5 + 0.6 * p);
+
+    /* 3 · 测地线积分 + 伪参考系拖曳 */
+    vec3 hv = cross(pos, vel);
+    float h2 = dot(hv, hv);
+    vec3 acc = -1.5 * Rs * h2 * pos / (r * r * r * r * r + 1e-4);
+    acc += spinDrag * cross(vec3(0.0, 1.0, 0.0), vel) / (r * r * r);
+    vel = normalize(vel + acc * dt);
+    vec3 newPos = pos + vel * dt;
+
+    /* 4 · 吸积盘：用真实走过的这一段检测穿越（进动后的盘面） */
+    float yB = newPos.y * ct - newPos.z * st;
+    if (yA * yB <= 0.0) {
+      float tc = -yA / (yB - yA + 1e-6);
+      vec3 hp = mix(pos, newPos, tc);
+      vec3 hpD = vec3(hp.x, 0.0, hp.y * st + hp.z * ct);
+      vec3 vD = vec3(vel.x, vel.y * ct - vel.z * st, vel.y * st + vel.z * ct);
+      float mag = lensMag(vel, rayDir, sPast, h0);
+      float fp = length(hp - camPos) * pixAng * mag / max(abs(vD.y), 0.05);
+      vec4 d = diskShade(hpD, vD, p, diskGain, inflow, fp);
+      col += (1.0 - alpha) * d.rgb;
+      alpha += (1.0 - alpha) * d.a;
+    }
+    pos = newPos;
+    yA = yB;
+    if (dot(pos, vel) > 0.0) sPast += dt;
+
+    // 已越过近心点、正在远离且 r>9：剩余偏折 <~7°，退出循环，余下路径直线解析求交
+    if (r > 9.0 && dot(pos, vel) > 0.0) break;
+    // 远离黑洞后的光线基本走直线；提前退出可以避免巨星轮廓被残余弯折啃成锯齿
+    if (r > 6.0 && dot(pos, vel) > 0.0 && length(cross(pos, vel)) > 3.2) break;
+    if (alpha > 0.985) break;
+  }
+
+  // 步数耗尽却仍缠在光子球附近的光线：按落入阴影处理，避免边缘噪点
+  if (!horizon && alpha < 0.985 && length(pos) < 3.0) {
+    col += (1.0 - alpha) * vec3(0.01, 0.016, 0.03);
+    alpha = 1.0;
+    horizon = true;
+  }
+
+  /* ---------------- 逃逸光线：盘面解析求交 → 潮汐流 → 蓝巨星 / 大气 / 星空 ---------------- */
+  if (!horizon && alpha < 0.985) {
+    vec3 pD = vec3(pos.x, pos.y * ct - pos.z * st, pos.y * st + pos.z * ct);
+    vec3 vD = vec3(vel.x, vel.y * ct - vel.z * st, vel.y * st + vel.z * ct);
+    if (pD.y * vD.y < 0.0) {
+      float sD = -pD.y / vD.y;
+      float mag = lensMag(vel, rayDir, sPast + sD, h0);
+      float fp = (length(pos - camPos) + sD) * pixAng * mag / max(abs(vD.y), 0.05);
+      vec4 d = diskShade(pD + vD * sD, vD, p, diskGain, inflow, fp);
+      col += (1.0 - alpha) * d.rgb;
+      alpha += (1.0 - alpha) * d.a;
+    }
+    col += (1.0 - alpha) * streamGlow(pos, vel, inflow);
+
+    // 蓝巨星：解析求交 + 亚像素边缘覆盖（轮廓不再是一像素硬台阶）
+    vec3 oc = pos - STAR_C;
+    float dC = length(oc);
+    float b = dot(oc, vel);
+    float ang = acos(clamp(-b / dC, -1.0, 1.0));
+    float angR = asin(min(STAR_R / dC, 1.0));
+    float pixA = pixAng * lensMag(vel, rayDir, sPast + max(-b, 0.0), h0);
+    float cov = 1.0 - smoothstep(-0.75 * pixA, 0.75 * pixA, ang - angR);
+    vec3 atm = starAtmosphere(pos, vel, p, pixA);
+    vec3 bg = atm + sampleStars(vel) * (1.0 - min(atm.b, 1.0) * 0.8);
+    if (cov > 0.001) {
+      float hh = b * b - (dot(oc, oc) - STAR_R * STAR_R);
+      vec3 hit;
+      if (hh > 0.0) hit = pos + vel * (-b - sqrt(hh));
+      else hit = STAR_C + normalize(oc - b * vel) * STAR_R;   // 掠过：取切点
+      vec3 nGeo = normalize(hit - STAR_C);
+      float mu = max(0.02, dot(nGeo, -vel));
+      float fpS = length(hit - camPos) * pixA / mu;         // 掠射角越大，星面足迹越长
+      vec3 sc = shadeStar(hit, nGeo, mu, p, fpS);
+      col += (1.0 - alpha) * mix(bg, sc, cov);
+    } else {
+      col += (1.0 - alpha) * bg;
+    }
+    alpha += (1.0 - alpha) * cov;
+  }
+  return vec4(col, alpha);
 }
 
 void main() {
-  vec2 uv = (2.0 * gl_FragCoord.xy - uRes) / uRes.y;
-  vec3 rd = normalize(uCamFwd + uFovTan * (uv.x * uCamRight + uv.y * uCamUp));
-  vec3 ro = uCamPos;
+  float aspect = u_resolution.x / u_resolution.y;
+  float p = clamp(u_progress, 0.0, 1.0);
+  float camP = easeInOutCubic(p);
 
-  float tStar;
-  vec3 starCol = shadeStar(ro, rd, tStar);
+  /* ---------------- 相机：拉近 + 滚转 20° + 黑洞偏右 ---------------- */
+  vec3 camPos = mix(vec3(0.0, 2.1, 16.5), vec3(0.0, 0.95, 12.0), camP);
+  camPos.x += u_mouse.x * 0.35;
+  camPos.y += u_mouse.y * 0.22;
+  vec3 fwd = normalize(-camPos);
+  vec3 right0 = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));
+  vec3 up0 = cross(right0, fwd);
+  float roll = 0.36;
+  float cr = cos(roll);
+  float sr = sin(roll);
+  vec3 right = cr * right0 + sr * up0;
+  vec3 up    = -sr * right0 + cr * up0;
+  float fov = mix(1.4, 1.58, camP);
+  vec2 shift = mix(vec2(-0.52, -0.06), vec2(-0.43, -0.10), camP);
+  vec2 s = vec2(v_uv.x * aspect, v_uv.y) + shift;
+  float pxS = 2.0 / u_resolution.y;   // 一个像素在 s 空间的尺寸
+  float pixAng = pxS / fov;           // 一个像素的张角（弧度）
 
-  vec3 col = vec3(0.0);
-  float trans = 1.0;
-  vec3 pos = ro;
-  vec3 vel = rd;
-  vec3 hv = cross(pos, vel);
-  float h2 = dot(hv, hv);
-  bool captured = false;
-  bool starFront = false;
-  float s = 0.0;
+  /* ---------------- 分层超采样：只在黑洞附近加密 ---------------- */
+  vec3 dir0 = normalize(s.x * right + s.y * up + fov * fwd);
+  float h0 = length(cross(camPos, dir0));
+  int ns = 1;
+  if (abs(h0 - H_CRIT) < 0.24) ns = 8;       // 阴影边缘 + 光子环
+  else if (h0 < 3.7) ns = 4;                 // 内盘 + 上方透镜拱弧
 
-  for (int i = 0; i < 400; i++) {
-    if (i >= uSteps) break;
-    float r2 = dot(pos, pos);
-    float r = sqrt(r2);
-    if (r < RS) { captured = true; break; }
-    if (r > 44.0 && dot(pos, vel) > 0.0) break;
-    if (trans < 0.012) break;
-    if (tStar > 0.0 && s > tStar) { starFront = true; break; }
-
-    float dt = clamp(0.30 * (r - RS * 0.7), 0.035, 1.0);
-    float rr0 = length(pos.xz);
-    if (rr0 < DOUT + 1.5) dt = min(dt, 0.038 + abs(pos.y) * 0.5);
-
-    vec3 acc = (-1.5 * h2 / (r2 * r2 * r)) * pos;
-    vel += acc * dt;
-    vec3 prev = pos;
-    pos += vel * dt;
-    s += dt;
-
-    if (prev.y * pos.y < 0.0) {
-      float tt = prev.y / (prev.y - pos.y);
-      vec3 cp = mix(prev, pos, tt);
-      float rr = length(cp.xz);
-      if (rr > DIN - 0.2 && rr < DOUT + 0.5) {
-        vec4 d = diskSample(cp, vel);
-        col += trans * d.rgb * d.a;
-        trans *= 1.0 - d.a * 0.88;
-      }
-    }
+  vec4 acc = vec4(0.0);
+  for (int i = 0; i < 8; i++) {
+    if (i >= ns) break;
+    vec2 off = (ns == 8) ? OFF8[i] : ((ns == 4) ? OFF4[i & 3] : vec2(0.0));
+    vec2 si = s + off * pxS;
+    vec3 rd = normalize(si.x * right + si.y * up + fov * fwd);
+    acc += traceSample(camPos, rd, p, pixAng);
   }
+  acc /= float(ns);
+  vec3 col = acc.rgb;
+  float alpha = acc.a;
 
-  if (starFront) {
-    col += starCol * trans;
-  } else if (!captured && trans > 0.012) {
-    col += trans * background(normalize(vel));
-    /* 恒星日冕：未命中球体的近星光线加一层蓝色外晕（体积感） */
-    if (uStarRadius > 0.02) {
-      vec3 toS = uStarPos - ro;
-      float proj = dot(toS, rd);
-      if (proj > 0.0) {
-        vec3 closest = ro + rd * proj;
-        float perp = length(closest - uStarPos);
-        float R = uStarRadius;
-        float halo = smoothstep(R * 3.6, R * 0.96, perp);
-        halo *= halo * (1.0 + uStream * 0.3); /* 被剥离得越猛，外层越亮 */
-        col += trans * uStarColor * halo * 1.35;
-        col += trans * vec3(0.72, 0.84, 1.0) * smoothstep(R * 1.6, R, perp) * 0.9; /* 内层浓密色雾 */
-      }
-    }
-  }
+  // 恒星把左半边画面整体浸成蓝色（参考图的左亮右暗），右侧也留一点深蓝灰而不是死黑
+  col += vec3(0.04, 0.08, 0.16) * (1.0 - smoothstep(-0.7, 1.0, v_uv.x)) * (1.0 - alpha * 0.3);
+  col += vec3(0.012, 0.02, 0.04) * (1.0 - alpha * 0.5);
 
-  /* 吞噬瞬间的白光脉冲（中心加权） */
-  col += uFlash * vec3(1.0, 1.0, 1.03) * exp(-dot(uv, uv) * 0.9);
+  col = aces(col);
+  col *= 1.0 - 0.18 * dot(v_uv, v_uv);
+  // 抖动：打散 8-bit 量化带（深色阴影与气辉渐变里的色阶）
+  col += (hash2i(ivec2(gl_FragCoord.xy)) - 0.5) * (1.0 / 255.0);
+  fragColor = vec4(col, 1.0);
+}
+`;
 
-  /* 曝光 → ACES → 暗角 → 微颗粒 → gamma */
-  col *= uExposure;
-  col = (col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14);
-  col *= 1.0 - 0.5 * pow(length(uv * vec2(0.72, 0.95)), 2.0);
-  col += (hash12(gl_FragCoord.xy + fract(uTime) * 137.0) - 0.5) * 0.007;
-  O = vec4(pow(max(col, 0.0), vec3(1.0 / 2.2)), 1.0);
-}`;
-
-/* ---------------- 引擎 ---------------- */
-
-const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const cross = (a: Vec3, b: Vec3): Vec3 => [
-  a[1] * b[2] - a[2] * b[1],
-  a[2] * b[0] - a[0] * b[2],
-  a[0] * b[1] - a[1] * b[0],
-];
-const norm = (a: Vec3): Vec3 => {
-  const l = Math.hypot(a[0], a[1], a[2]) || 1;
-  return [a[0] / l, a[1] / l, a[2] / l];
-};
-const lerpV = (a: Vec3, b: Vec3, t: number): Vec3 => [
-  a[0] + (b[0] - a[0]) * t,
-  a[1] + (b[1] - a[1]) * t,
-  a[2] + (b[2] - a[2]) * t,
-];
-const ss = (a: number, b: number, x: number) => {
-  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
-  return t * t * (3 - 2 * t);
-};
+const RENDER_SCALES = [1, 0.85, 0.7, 0.55];
 
 export class BlackholeScene {
-  static supported(): boolean {
-    try {
-      return !!document.createElement("canvas").getContext("webgl2");
-    } catch {
-      return false;
-    }
+  /** 浏览器不支持 WebGL2 时为 false，页面据此回退到通用板块页 */
+  readonly supported: boolean;
+
+  private canvas: HTMLCanvasElement;
+  private cb: BlackholeCallbacks;
+  private gl: WebGL2RenderingContext | null = null;
+  private program: WebGLProgram | null = null;
+  private vao: WebGLVertexArrayObject | null = null;
+  private vbo: WebGLBuffer | null = null;
+
+  private uResolution: WebGLUniformLocation | null = null;
+  private uTime: WebGLUniformLocation | null = null;
+  private uProgress: WebGLUniformLocation | null = null;
+  private uMouse: WebGLUniformLocation | null = null;
+  private uSpin: WebGLUniformLocation | null = null;
+  private uFlow: WebGLUniformLocation | null = null;
+  private uKnots: WebGLUniformLocation | null = null;
+  private uStream: WebGLUniformLocation | null = null;
+
+  private rafId = 0;
+  private startTime = 0;
+  private disposed = false;
+
+  private progress = 0;
+  private targetProgress = 0;
+  private mouseX = 0;
+  private mouseY = 0;
+  private targetMouseX = 0;
+  private targetMouseY = 0;
+
+  /* 由 dt 积分的运动相位：转速随滚动变化时纹理连续，不会跳变 */
+  private spin = 0;
+  private flow = 0;
+  private knots = [0, 0, 0];
+  private streamT = 0;
+  private lastFrame = 0;
+
+  private width = 0;
+  private height = 0;
+
+  /* 自适应分辨率：帧耗时超标就降内部分辨率，保住 60fps */
+  private scaleIdx = 0;
+  private frameEMA = 16.7;
+  private lastScaleChange = 0;
+
+  constructor(canvas: HTMLCanvasElement, cb: BlackholeCallbacks = {}) {
+    this.canvas = canvas;
+    this.cb = cb;
+    this.supported = this.initGL();
+    this.startTime = performance.now();
+    if (this.supported) this.attach();
   }
 
-  private gl: WebGL2RenderingContext;
-  private program: WebGLProgram;
-  private vao: WebGLVertexArrayObject;
-  private locs = new Map<string, WebGLUniformLocation | null>();
-  private raf = 0;
-  private last = 0;
-  private running = false;
-  private destroyed = false;
-  private target = 0;
-  private smooth = 0;
-  private time = 0;
-  private px = 0;
-  private py = 0;
-  private spx = 0;
-  private spy = 0;
-  private resScale = 1;
-  private emaMs = 16;
-  private adaptAcc = 0;
-  private onDetach: (() => void)[] = [];
-  private preset: BlackholePreset;
-  private onFrame?: (p: number) => void;
-  private steps: number;
-
-  constructor(
-    private canvas: HTMLCanvasElement,
-    preset: BlackholePreset,
-    opts: BlackholeSceneOptions = {}
-  ) {
-    const gl = canvas.getContext("webgl2", {
+  private initGL(): boolean {
+    const gl = this.canvas.getContext("webgl2", {
       alpha: false,
       antialias: false,
       depth: false,
-      stencil: false,
       powerPreference: "high-performance",
     });
-    if (!gl) throw new Error("webgl2 unavailable");
+    if (!gl) return false;
     this.gl = gl;
-    this.preset = preset;
-    this.onFrame = opts.onFrame;
-    this.steps = opts.coarse ? 140 : 240;
 
-    const compile = (type: number, src: string) => {
-      const sh = gl.createShader(type)!;
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-        const log = gl.getShaderInfoLog(sh);
-        gl.deleteShader(sh);
-        throw new Error("shader compile failed: " + log);
-      }
-      return sh;
-    };
-    const vs = compile(gl.VERTEX_SHADER, VERT);
-    const fs = compile(gl.FRAGMENT_SHADER, FRAG);
-    const program = gl.createProgram()!;
-    gl.attachShader(program, vs);
-    gl.attachShader(program, fs);
-    gl.linkProgram(program);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error("program link failed: " + gl.getProgramInfoLog(program));
+    const vs = this.compileShader(gl.VERTEX_SHADER, VERT_SHADER);
+    const fs = this.compileShader(gl.FRAGMENT_SHADER, FRAG_SHADER);
+    if (!vs || !fs) return false;
+
+    const prog = gl.createProgram();
+    if (!prog) return false;
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error("Program link failed:", gl.getProgramInfoLog(prog));
+      return false;
     }
-    this.program = program;
-    this.vao = gl.createVertexArray()!;
-    gl.useProgram(program);
-    gl.bindVertexArray(this.vao);
+    this.program = prog;
+
+    this.uResolution = gl.getUniformLocation(prog, "u_resolution");
+    this.uTime = gl.getUniformLocation(prog, "u_time");
+    this.uProgress = gl.getUniformLocation(prog, "u_progress");
+    this.uMouse = gl.getUniformLocation(prog, "u_mouse");
+    this.uSpin = gl.getUniformLocation(prog, "u_spin");
+    this.uFlow = gl.getUniformLocation(prog, "u_flow");
+    this.uKnots = gl.getUniformLocation(prog, "u_knots");
+    this.uStream = gl.getUniformLocation(prog, "u_stream");
+
+    const quad = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
+    const vao = gl.createVertexArray();
+    const vbo = gl.createBuffer();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    const aPos = gl.getAttribLocation(prog, "a_pos");
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+    this.vao = vao;
+    this.vbo = vbo;
 
     this.resize();
-    this.attach();
-    this.start();
+    return true;
   }
 
-  private loc(name: string) {
-    if (!this.locs.has(name)) {
-      this.locs.set(name, this.gl.getUniformLocation(this.program, name));
+  private compileShader(type: number, src: string): WebGLShader | null {
+    const gl = this.gl;
+    if (!gl) return null;
+    const s = gl.createShader(type);
+    if (!s) return null;
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error("Shader compile error:", gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
     }
-    return this.locs.get(name)!;
+    return s;
   }
 
   private attach() {
-    const onWinResize = () => this.resize();
-    window.addEventListener("resize", onWinResize);
-    this.onDetach.push(() => window.removeEventListener("resize", onWinResize));
-
-    const ro = new ResizeObserver(() => this.resize());
-    ro.observe(this.canvas);
-    this.onDetach.push(() => ro.disconnect());
-
-    const onVis = () => (document.hidden ? this.stop() : this.start());
-    document.addEventListener("visibilitychange", onVis);
-    this.onDetach.push(() =>
-      document.removeEventListener("visibilitychange", onVis)
-    );
-
-    const onPtr = (e: PointerEvent) => {
-      const r = this.canvas.getBoundingClientRect();
-      this.px = ((e.clientX - r.left) / r.width) * 2 - 1;
-      this.py = ((e.clientY - r.top) / r.height) * 2 - 1;
-    };
-    this.canvas.addEventListener("pointermove", onPtr);
-    this.onDetach.push(() =>
-      this.canvas.removeEventListener("pointermove", onPtr)
-    );
-
-    const onLost = (e: Event) => {
-      e.preventDefault();
-      this.stop();
-    };
-    this.canvas.addEventListener("webglcontextlost", onLost);
-    this.onDetach.push(() =>
-      this.canvas.removeEventListener("webglcontextlost", onLost)
-    );
-  }
-
-  setProgress(raw: number) {
-    this.target = Math.min(1, Math.max(0, raw));
-  }
-
-  private resize() {
-    if (this.destroyed) return;
-    const rect = this.canvas.getBoundingClientRect();
-    const dpr = Math.min(1.25, window.devicePixelRatio || 1) * this.resScale;
-    const w = Math.max(2, Math.round(rect.width * dpr));
-    const h = Math.max(2, Math.round(rect.height * dpr));
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-    }
-    this.gl.viewport(0, 0, w, h);
-  }
-
-  private start() {
-    if (this.running || this.destroyed) return;
-    this.running = true;
-    this.last = performance.now();
-    const loop = (now: number) => {
-      if (!this.running) return;
-      const ms = now - this.last;
-      this.last = now;
-      this.tick(Math.min(ms, 100) / 1000, ms);
-      this.raf = requestAnimationFrame(loop);
-    };
-    this.raf = requestAnimationFrame(loop);
-  }
-
-  private stop() {
-    this.running = false;
-    cancelAnimationFrame(this.raf);
-  }
-
-  private tick(dt: number, ms: number) {
-    const gl = this.gl;
-    this.time += dt;
-
-    /* 滚动进度指数平滑（运镜阻尼） */
-    this.smooth += (this.target - this.smooth) * (1 - Math.exp(-dt / 0.13));
-    const p = this.smooth;
-    this.spx += (this.px - this.spx) * (1 - Math.exp(-dt / 0.25));
-    this.spy += (this.py - this.spy) * (1 - Math.exp(-dt / 0.25));
-
-    /* 自适应分辨率：帧耗时超标就降内部分辨率 */
-    this.emaMs = this.emaMs * 0.94 + ms * 0.06;
-    this.adaptAcc += dt;
-    if (this.adaptAcc > 1.2) {
-      this.adaptAcc = 0;
-      if (this.emaMs > 24 && this.resScale > 0.62) {
-        this.resScale = Math.max(0.62, this.resScale * 0.82);
-        this.resize();
-      } else if (this.emaMs < 13 && this.resScale < 1) {
-        this.resScale = Math.min(1, this.resScale * 1.12);
-        this.resize();
-      }
-    }
-
-    /* ---- 运镜插值 ---- */
-    const keys = this.preset.camKeys;
-    let k0 = keys[0];
-    let k1 = keys[keys.length - 1];
-    for (let i = 0; i < keys.length - 1; i++) {
-      if (p >= keys[i].p && p <= keys[i + 1].p) {
-        k0 = keys[i];
-        k1 = keys[i + 1];
-        break;
-      }
-    }
-    const span = Math.max(k1.p - k0.p, 1e-4);
-    const u = ss(0, 1, (p - k0.p) / span);
-    const drift: Vec3 = [
-      Math.sin(this.time * 0.11) * 0.18,
-      Math.sin(this.time * 0.07) * 0.1,
-      0,
-    ];
-    const camPos = lerpV(k0.pos, k1.pos, u);
-    let tgt = lerpV(k0.tgt, k1.tgt, u);
-    /* 鼠标视差：轻微转动视线 */
-    tgt = [tgt[0] + this.spx * 1.2, tgt[1] - this.spy * 0.5, tgt[2]];
-    const fov = k0.fov + (k1.fov - k0.fov) * u;
-
-    const eye: Vec3 = [camPos[0] + drift[0], camPos[1] + drift[1], camPos[2]];
-    const fwd = norm(sub(tgt, eye));
-    const right = norm(cross(fwd, [0, 1, 0]));
-    const up = cross(right, fwd);
-
-    /* ---- 恒星状态：巨物镇场，位置与体积基本不变，只有光在"流失" ---- */
-    const s0 = this.preset.starPos;
-    const starPos: Vec3 = [s0[0], s0[1], s0[2]];
-    const starR = this.preset.starRadius;
-    const stretch = 1; /* 保持完美球体：不做潮汐水滴变形 */
-    const stretchAxis = norm([-s0[0], -s0[1], -s0[2]]);
-
-    /* ---- 黑洞自转提速 + 物质抽吸：滚动越深越狂暴 ---- */
-    const spin = 1 + 6.5 * ss(0.18, 0.78, p) + 0.25 * Math.sin(this.time * 1.7);
-    const diskBright =
-      0.5 + 0.68 * ss(0.1, 0.55, p) - 0.34 * ss(0.72, 1.0, p) + 0.06 * Math.sin(this.time * 0.7);
-    const stream = 0.3 + 2.1 * ss(0.08, 0.62, p);
-    const d = (p - 0.68) / 0.05;
-    const flash = 0.5 * Math.exp(-d * d); /* 吞噬高潮的能量脉冲，不抹掉恒星 */
-
-    /* ---- uniforms ---- */
-    gl.useProgram(this.program);
-    gl.bindVertexArray(this.vao);
-    const L = (n: string) => this.loc(n);
-    gl.uniform2f(L("uRes"), this.canvas.width, this.canvas.height);
-    gl.uniform1f(L("uTime"), this.time);
-    gl.uniform1f(L("uProgress"), p);
-    gl.uniform3fv(L("uCamPos"), eye);
-    gl.uniform3fv(L("uCamRight"), right);
-    gl.uniform3fv(L("uCamUp"), up);
-    gl.uniform3fv(L("uCamFwd"), fwd);
-    gl.uniform1f(L("uFovTan"), fov);
-    gl.uniform3fv(L("uDiskInner"), this.preset.diskInner);
-    gl.uniform3fv(L("uDiskOuter"), this.preset.diskOuter);
-    gl.uniform3fv(L("uStarColor"), this.preset.starColor);
-    gl.uniform3fv(L("uStarPos"), starPos);
-    gl.uniform3fv(L("uStretchAxis"), stretchAxis);
-    gl.uniform1f(L("uStarRadius"), starR);
-    gl.uniform1f(L("uStretch"), stretch);
-    gl.uniform1f(L("uStream"), stream);
-    gl.uniform1f(L("uSpin"), spin);
-    gl.uniform1f(L("uDiskBright"), diskBright);
-    gl.uniform1f(L("uFlash"), flash);
-    gl.uniform1f(L("uStarTh"), Math.atan2(starPos[2], starPos[0]));
-    gl.uniform1f(L("uExposure"), this.preset.exposure);
-    gl.uniform1i(L("uSteps"), this.steps);
-
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    this.onFrame?.(p);
+    window.addEventListener("resize", this.resize);
+    window.addEventListener("pointermove", this.onPointerMove, { passive: true });
+    document.addEventListener("visibilitychange", this.onVisibility);
+    this.rafId = requestAnimationFrame(this.render);
   }
 
   destroy() {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    this.stop();
-    for (const off of this.onDetach) off();
-    this.onDetach = [];
-    this.gl.deleteProgram(this.program);
-    this.gl.deleteVertexArray(this.vao);
-    /* 注意：不要调用 WEBGL_lose_context.loseContext()——StrictMode 下
-       同一 canvas 会被重新挂载，丢失的上下文会让二次创建永远失败。
-       canvas 元素卸载后上下文由浏览器随 GC 回收。 */
+    this.disposed = true;
+    cancelAnimationFrame(this.rafId);
+    window.removeEventListener("resize", this.resize);
+    window.removeEventListener("pointermove", this.onPointerMove);
+    document.removeEventListener("visibilitychange", this.onVisibility);
+    const gl = this.gl;
+    if (gl) {
+      if (this.vbo) gl.deleteBuffer(this.vbo);
+      if (this.vao) gl.deleteVertexArray(this.vao);
+      if (this.program) gl.deleteProgram(this.program);
+    }
   }
+
+  private onVisibility = () => {
+    if (document.hidden) {
+      cancelAnimationFrame(this.rafId);
+    } else {
+      this.lastFrame = 0;
+      this.rafId = requestAnimationFrame(this.render);
+    }
+  };
+
+  private onPointerMove = (e: PointerEvent) => {
+    const cx = window.innerWidth * 0.5;
+    const cy = window.innerHeight * 0.5;
+    this.targetMouseX = (e.clientX - cx) / cx;
+    this.targetMouseY = -(e.clientY - cy) / cy;
+  };
+
+  setProgress(target: number) {
+    this.targetProgress = Math.max(0, Math.min(1, target));
+  }
+
+  private resize = () => {
+    const rect = this.canvas.getBoundingClientRect();
+    const w = Math.max(320, rect.width || window.innerWidth);
+    const h = Math.max(320, rect.height || window.innerHeight);
+    const dpr = Math.min(1.25, window.devicePixelRatio || 1) * RENDER_SCALES[this.scaleIdx];
+    this.width = Math.floor(w * dpr);
+    this.height = Math.floor(h * dpr);
+    this.canvas.width = this.width;
+    this.canvas.height = this.height;
+    this.gl?.viewport(0, 0, this.width, this.height);
+  };
+
+  private adaptResolution(now: number, dtMs: number) {
+    if (dtMs > 0) this.frameEMA += (Math.min(dtMs, 100) - this.frameEMA) * 0.08;
+    if (now - this.lastScaleChange < 2500) return;
+    if (this.frameEMA > 24 && this.scaleIdx < RENDER_SCALES.length - 1) {
+      this.scaleIdx++;
+      this.lastScaleChange = now;
+      this.resize();
+    } else if (this.frameEMA < 11 && this.scaleIdx > 0 && now - this.lastScaleChange > 5000) {
+      this.scaleIdx--;
+      this.lastScaleChange = now;
+      this.resize();
+    }
+  }
+
+  /** 按当前进度对应的转速积分各运动相位（wrap 到 2π 保持数值精度） */
+  private integrateMotion(dt: number) {
+    const p = this.progress;
+    const speedMul = 1 + 7 * Math.pow(p, 1.6);
+    this.spin = (this.spin + dt * speedMul * 0.55) % TAU;
+    this.flow += dt * (0.35 + 1.6 * p);
+    for (let i = 0; i < 3; i++) {
+      const w = (speedMul * 1.4) / Math.pow(KNOT_RADII[i], 1.5);
+      this.knots[i] = (this.knots[i] + dt * w) % TAU;
+    }
+    this.streamT += dt * (1.6 + 6.5 * p);
+  }
+
+  private render = (now: number) => {
+    if (this.disposed) return;
+    const gl = this.gl;
+    if (gl && this.program && this.vao) {
+      const dtMs = this.lastFrame ? now - this.lastFrame : 0;
+      this.lastFrame = now;
+      const dt = Math.min(0.05, dtMs / 1000);
+      this.adaptResolution(now, dtMs);
+
+      this.progress += (this.targetProgress - this.progress) * 0.085;
+      this.mouseX += (this.targetMouseX - this.mouseX) * 0.08;
+      this.mouseY += (this.targetMouseY - this.mouseY) * 0.08;
+      this.integrateMotion(dt);
+      this.cb.onProgress?.(this.progress);
+
+      gl.useProgram(this.program);
+      gl.bindVertexArray(this.vao);
+      gl.uniform2f(this.uResolution, this.width, this.height);
+      gl.uniform1f(this.uTime, (now - this.startTime) * 0.001);
+      gl.uniform1f(this.uProgress, this.progress);
+      gl.uniform2f(this.uMouse, this.mouseX, this.mouseY);
+      gl.uniform1f(this.uSpin, this.spin);
+      gl.uniform1f(this.uFlow, this.flow);
+      gl.uniform3f(this.uKnots, this.knots[0], this.knots[1], this.knots[2]);
+      gl.uniform1f(this.uStream, this.streamT);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    this.rafId = requestAnimationFrame(this.render);
+  };
 }

@@ -135,9 +135,63 @@ export const nav = [
   { label: "关于", en: "ABOUT", starId: "neutron-star" },
 ];
 
-/** 「摇滚」板块终局构图中浮现的卡片（占位内容，直接改这里） */
-export const rockCards = [
-  { k: "01", t: "正在建造中", d: "这段旋律还没被录制下来，它仍在月背回响。" },
-  { k: "02", t: "内容占位", d: "曲目、现场与即兴，会陆续落进这条吸积流。" },
-  { k: "03", t: "结构占位", d: "以专辑为单位环绕，保持噪声与秩序的平衡。" },
+export interface RockCard {
+  id: string;
+  index: string;
+  title: string;
+  titleEn: string;
+  category: string;
+  tagline: string;
+  description: string;
+  metrics: { label: string; value: string }[];
+  accent: string;
+}
+
+/** 「摇滚」板块终局构图中浮现的卡片，蓝巨星二级页会沿吸积盘渐次展示。 */
+export const rockCards: RockCard[] = [
+  {
+    id: "sound-design",
+    index: "01",
+    title: "频率重构",
+    titleEn: "FREQUENCY RECONSTRUCTION",
+    category: "SOUND DESIGN · 合成器与吉他",
+    tagline: "在黑洞边缘被拉扯成光子流的琴弦声",
+    description: "重型电子与失真吉他的交叠。将模拟合成器的自激振荡推至饱和边缘，录制真空中的脉冲回声与过载泛音。",
+    metrics: [
+      { label: "采样率", value: "192 kHz" },
+      { label: "动态范围", value: "138 dB" },
+      { label: "调音系统", value: "Drop A / 微音程" },
+    ],
+    accent: "#8fb6ff",
+  },
+  {
+    id: "live-recording",
+    index: "02",
+    title: "极速共振",
+    titleEn: "HIGH-ENERGY RESONANCE",
+    category: "LIVE · 现场收音与实验",
+    tagline: "千万吨等离子体撞击视界时的低频轰鸣",
+    description: "不使用任何纯净采样。所有鼓点源自金属残骸碰撞的自然延音，结合双耳麦克风捕获的环绕声学空间。",
+    metrics: [
+      { label: "峰值声压", value: "124 dBA" },
+      { label: "回响时间", value: "4.8 s" },
+      { label: "录制载体", value: "1/4 磁带" },
+    ],
+    accent: "#a8c9ff",
+  },
+  {
+    id: "discography",
+    index: "03",
+    title: "视界纪元",
+    titleEn: "EVENT HORIZON ERA",
+    category: "RELEASES · 声音档案",
+    tagline: "最后一束逃离引力井的光波所携带的音轨",
+    description: "收录从 2024 至 2026 年间记录的三张概念单曲。包含未消亡恒星的最后一段旋律与纯模拟母带压盘。",
+    metrics: [
+      { label: "发行介质", value: "黑胶 / DSD" },
+      { label: "曲目数", value: "7 TRACKS" },
+      { label: "编号", value: "BH-084-LP" },
+    ],
+    accent: "#cce0ff",
+  },
 ];
