@@ -1,0 +1,13 @@
+{
+  "name": "雨中虹影 · 世界毁灭前梦栖息的地方",
+  "short_name": "雨中虹影",
+  "description": "个人网站 · 移动鼠标，你将成为一个大质量黑洞。",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#030304",
+  "theme_color": "#030304",
+  "icons": [
+    { "src": "/site-icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/logo-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
