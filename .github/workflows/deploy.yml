@@ -1,0 +1,51 @@
+name: Deploy
+
+# 网站由 Cloudflare Pages 从 main 分支自动构建部署（https://rainburst.cc）。
+# 这个 workflow 不做构建，只把每次推送登记成一次 GitHub Deployment，
+# 这样仓库首页右侧会出现 Deployments 区块，并指向线上地址。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  record:
+    name: 登记部署
+    runs-on: ubuntu-latest
+    steps:
+      - name: 创建 Deployment 并标记成功
+        uses: actions/github-script@v7
+        env:
+          SITE_URL: https://rainburst.cc
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sha = context.sha;
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            const { data: deployment } = await github.rest.repos.createDeployment({
+              owner,
+              repo,
+              ref: sha,
+              environment: 'rainburst.cc',
+              description: 'Cloudflare Pages 自动构建',
+              auto_merge: false,
+              required_contexts: [],
+            });
+
+            await github.rest.repos.createDeploymentStatus({
+              owner,
+              repo,
+              deployment_id: deployment.id,
+              state: 'success',
+              environment_url: process.env.SITE_URL,
+              log_url: runUrl,
+              description: 'https://rainburst.cc 已上线',
+            });
+
+            core.info(`已登记部署 ${deployment.id} → ${process.env.SITE_URL}`);
