@@ -66,8 +66,12 @@ export default function App() {
           onSwallowDone={swallowDone}
         />
       )}
-      {/* 胶囊常驻；蓝巨星页底部有卡片行，挪到顶部居中 */}
-      <MusicCapsule position={onBlueGiant ? "top" : "bottom"} engineRef={engineRef} />
+      {/* 胶囊常驻；蓝巨星页底部有卡片行，挪到顶部居中；影像页底下每帧有 WebGL 画布，玻璃降级为纯 blur 保帧率 */}
+      <MusicCapsule
+        position={onBlueGiant ? "top" : "bottom"}
+        glass={onRedGiant ? "plain" : "liquid"}
+        engineRef={engineRef}
+      />
     </>
   );
 }

@@ -7,6 +7,9 @@ import type { Cosmos } from "../universe/engine";
 interface Props {
   /** top：蓝巨星页顶部（避开底部卡片行）；bottom：其余视图 */
   position?: "bottom" | "top";
+  /** liquid：液态玻璃折射（默认）；plain：纯 blur——影像页底下每帧有 WebGL 画布在变，
+   *  feDisplacementMap 的 backdrop 重采样会把整页拖到 ~12fps，实测纯 blur 后满帧 */
+  glass?: "liquid" | "plain";
   /** 宇宙引擎 ref，用于读取黑洞位置做排斥计算 */
   engineRef: React.RefObject<Cosmos | null>;
 }
@@ -16,7 +19,7 @@ interface Props {
  * 内部为实时频谱细条（左高右低"山脉"轮廓），歌名居中浮在条上方。
  * 挂在 App，跨视图常驻。
  */
-export default function MusicCapsule({ position = "bottom", engineRef }: Props) {
+export default function MusicCapsule({ position = "bottom", glass = "liquid", engineRef }: Props) {
   const [state, setState] = useState<MusicState>(music.getState());
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const outerRef = useRef<HTMLDivElement>(null);
@@ -34,8 +37,14 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
 
   useEffect(() => music.subscribe(setState), []);
 
-  /* ---------- 液态玻璃滤镜（挂载时 + resize 防抖重建） ---------- */
+  /* ---------- 液态玻璃滤镜（liquid 模式：挂载时 + resize 防抖重建；plain 模式：纯 blur） ---------- */
   useEffect(() => {
+    const el0 = outerRef.current;
+    if (glass === "plain") {
+      el0?.style.setProperty("--lg-filter", "blur(8px)");
+      document.getElementById("music-capsule")?.remove();
+      return;
+    }
     let t = 0;
     const apply = () => {
       const el = outerRef.current;
@@ -67,7 +76,7 @@ export default function MusicCapsule({ position = "bottom", engineRef }: Props) 
       window.removeEventListener("resize", onResize);
       document.getElementById("music-capsule")?.remove();
     };
-  }, []);
+  }, [glass]);
 
   /* ---------- 黑洞排斥：椭圆势垒 + 弹簧回位 ---------- */
   useEffect(() => {

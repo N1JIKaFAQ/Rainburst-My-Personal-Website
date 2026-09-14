@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { RedGiantScene } from "../universe/redgiant";
 import SectionPage from "./SectionPage";
-import { createLiquidGlassFilter } from "../utils/liquidGlass";
 import { galleryItems, type GalleryItem } from "../data/gallery";
 import { site, type StarDef } from "../data/site";
 
@@ -35,39 +34,12 @@ function easeOutQuint(t: number) {
   return 1 - Math.pow(1 - t, 5);
 }
 
-/** 全站共享的液态玻璃滤镜：挂载时生成一次，CSS 变量 --lg-filter 指向它，resize 重建。 */
-function useGlobalLiquidGlass() {
-  useEffect(() => {
-    let t = 0;
-    const apply = () => {
-      const w = Math.min(window.innerWidth, 900);
-      const h = Math.min(window.innerHeight, 1100);
-      try {
-        const fid = createLiquidGlassFilter({
-          width: w,
-          height: h,
-          radius: 28,
-          intensity: 0.5,
-          id: "rg-glass",
-        });
-        document.documentElement.style.setProperty("--lg-filter", `url(#${fid}) blur(10px)`);
-      } catch {
-        document.documentElement.style.setProperty("--lg-filter", "blur(14px)");
-      }
-    };
-    const raf = requestAnimationFrame(apply);
-    const onResize = () => {
-      window.clearTimeout(t);
-      t = window.setTimeout(apply, 250);
-    };
-    window.addEventListener("resize", onResize);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.clearTimeout(t);
-      window.removeEventListener("resize", onResize);
-    };
-  }, []);
-}
+/**
+ * 影像页玻璃 = 纯 CSS blur（不建 SVG 位移滤镜）。
+ * 实测归因：backdrop-filter 引用 feDisplacementMap 在 Chromium 走 CPU 路径，
+ * 底下每帧变化的 WebGL 画布会逼每面玻璃每帧重采样 backdrop——12 面叠加时整页掉到 ~12fps，
+ * 换成纯 blur 后 144fps。磨砂底、渐变高光、inset 描边这些纯 CSS 层保留，观感几乎不变。
+ */
 
 /* ===================== 主页面 ===================== */
 
@@ -77,8 +49,6 @@ export default function RedGiantPage({ star, onBack }: Props) {
   const [unsupported, setUnsupported] = useState(false);
   /** 入场完成度 0→1（由远及近），驱动右侧内容淡入 */
   const [p, setP] = useState(0);
-
-  useGlobalLiquidGlass();
 
   const total = galleryItems.length;
   const mod = (n: number) => ((n % total) + total) % total;
@@ -125,8 +95,9 @@ export default function RedGiantPage({ star, onBack }: Props) {
     let raf = 0;
     const start = performance.now();
     const tick = (now: number) => {
-      raf = requestAnimationFrame(tick);
-      setP(easeOutQuint(clamp01((now - start) / G_CARD_ENTRANCE)));
+      const e = easeOutQuint(clamp01((now - start) / G_CARD_ENTRANCE));
+      setP(e);
+      if (e < 1) raf = requestAnimationFrame(tick); // 入场完成后自停，不再每帧空转 setState
     };
     raf = requestAnimationFrame(tick);
     return () => {
@@ -229,7 +200,7 @@ export default function RedGiantPage({ star, onBack }: Props) {
             {galleryItems.map((it, i) => (
               <span
                 key={it.id}
-                className="h-1 rounded-full transition-all duration-500"
+                className="h-1 rounded-full transition-[width,background-color] duration-500"
                 style={{
                   width: i === mod(topIdx) ? 18 : 6,
                   background: i === mod(topIdx) ? accent : "rgba(255,255,255,0.18)",
@@ -291,9 +262,10 @@ function StackStage({
               key={it.id}
               className="absolute inset-0 origin-center"
               style={{
-                transform: st.transform,
-                opacity: st.opacity,
-                zIndex: d === 0 ? 30 : d === 1 || d === -1 ? 20 : 10,
+              transform: st.transform,
+              opacity: st.opacity,
+              willChange: "transform",
+              zIndex: d === 0 ? 30 : d === 1 || d === -1 ? 20 : 10,
                 transition:
                   Math.abs(d) >= 2
                     ? "none"
