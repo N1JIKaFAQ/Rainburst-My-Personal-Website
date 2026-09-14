@@ -32,6 +32,7 @@ uniform float u_time;     // 秒（呼吸/演化用）
 uniform float u_rot;      // 自转相位 rad（JS 积分）
 uniform float u_p;        // 入场进度 0..1（0=远处完整盘，1=定格左缘弧段）
 uniform float u_fade;     // 整幅亮度 0..1（返回宇宙时淡出）
+uniform vec3  u_act;      // 表面活动强度 (日珥弧, 耀斑亮核, 抛射羽流)
 
 /* ---------------- 哈希与噪声（与 blackhole.ts 同源） ---------------- */
 uint uhash(uint n) {
@@ -174,6 +175,39 @@ void main() {
   bg += vec3(0.030, 0.010, 0.004) * exp(-max(0.0, dist - R) * 1.1) * 0.8;
   bg *= 1.0 - 0.16 * dot(s * vec2(1.0 / max(aspect, 1.0), 1.0), s * vec2(1.0 / max(aspect, 1.0), 1.0));
 
+  // ---- 表面活动（日珥弧 / 耀斑亮核 / 盘缘透亮）：盘外 0.85 环带 + 盘内 μ<0.5 近缘带，其余像素跳过 ----
+  float act = smoothstep(0.30, 0.65, u_p);           // 入场推近过程保持平静，星体临近才逐渐点燃
+  if (act > 0.001 && L > R - 0.35 && L < R + 0.85) {
+    float th = atan(q.y, q.x);                        // 相对球心的屏幕角；可见弧带在 th≈0 附近
+    for (int i = 0; i < 3; i++) {
+      float fi = float(i);
+      // 三个活动窗口：可见弧带对球心的屏幕角只有 ±0.31 rad，窗口取 -0.2/0/+0.2，
+      // 各自绕基准角缓慢漂移（模拟活动区被自转带到临边），独立喷发相位
+      float wobble = 0.10 * sin(u_time * 0.011 + fi * 2.4);
+      float wAng = (fi - 1.0) * 0.20 + wobble;
+      float angD = atan(sin(th - wAng), cos(th - wAng));
+      float win = exp(-angD * angD / (0.007 + 0.005 * fi));
+      float phase = sin(u_time * (0.09 + 0.028 * fi) + fi * 2.1);
+      float burst = pow(max(0.0, phase), 3.0) * act;  // 喷发包络；负半周归零回到平静
+      float h = 0.10 + 0.34 * burst + 0.05 * noise3D(vec3(fi * 9.1, u_time * 0.22, 0.0));
+      // 日珥弧截面：从星缘向上 h 的亮柱，顶部收尖渐隐（plume 形而非方柱）
+      float v = clamp(gap / max(h, 0.02), 0.0, 1.2);
+      float prof = pow(max(0.0, 1.0 - v), 2.2) * smoothstep(1.0, 0.55, v);
+      float fib = fbm3D(vec3(angD * 26.0, u_time * 0.10 + fi * 5.0, 0.0));
+      float dens = prof * win * (0.40 + 0.85 * fib) * (0.25 + 1.15 * burst) * u_act.x;
+      // 耀斑亮核：贴星缘的高斯核，随爆发变宽变亮，带闪烁
+      float core = exp(-pow(gap / (0.018 + 0.030 * burst), 2.0)) * win * burst * u_act.y;
+      core *= 0.82 + 0.22 * sin(u_time * 6.7 + fi * 2.0 + angD * 9.0);
+      // 抛射羽流：沿弧的余弦细条纹（u_act.z=0 时退化为光滑弧）
+      float hj = 0.5 + 0.5 * cos(angD * (21.0 + fi * 13.0) + fi * 1.7);
+      hj = mix(1.0, hj, u_act.z);
+      bg += vec3(1.00, 0.30, 0.07) * dens * hj * 0.9;
+      bg += vec3(1.00, 0.62, 0.24) * core * 1.5;
+      // 盘缘内侧同步微增亮（爆发时弧缘"透出"红光）
+      col += vec3(1.00, 0.34, 0.08) * win * (0.30 + 1.0 * burst) * pow(1.0 - mu, 3.5) * 0.6;
+    }
+  }
+
   // 少量背景星点（很暗，给空间感）
   vec2 g = s * 140.0;
   ivec2 cell2 = ivec2(floor(g));
@@ -203,6 +237,9 @@ export const RED_GIANT_DEFAULTS = {
   /** 入场时长 ms */ entranceMs: 1800,
 };
 
+/** 太阳活动强度旋钮（运行时可改 scene.activity）：日珥弧 / 耀斑亮核 / 抛射羽流条纹 */
+export const SOLAR_ACTIVITY = { loops: 1.0, flares: 1.0, jets: 1.0 };
+
 export class RedGiantScene {
   /** 浏览器不支持 WebGL2 时为 false，页面据此回退到通用板块页 */
   readonly supported: boolean;
@@ -218,6 +255,7 @@ export class RedGiantScene {
   private uRot: WebGLUniformLocation | null = null;
   private uP: WebGLUniformLocation | null = null;
   private uFade: WebGLUniformLocation | null = null;
+  private uAct: WebGLUniformLocation | null = null;
 
   private rafId = 0;
   private startTime = 0;
@@ -238,6 +276,8 @@ export class RedGiantScene {
 
   /** 自转角速度 rad/s（可运行时调） */
   spinRate = RED_GIANT_DEFAULTS.spinRate;
+  /** 太阳活动强度 (日珥, 耀斑, 羽流)，运行时可改 */
+  activity: [number, number, number] = [SOLAR_ACTIVITY.loops, SOLAR_ACTIVITY.flares, SOLAR_ACTIVITY.jets];
 
   private scaleIdx = 0;
   private frameEMA = 16.7;
@@ -281,6 +321,7 @@ export class RedGiantScene {
     this.uRot = gl.getUniformLocation(prog, "u_rot");
     this.uP = gl.getUniformLocation(prog, "u_p");
     this.uFade = gl.getUniformLocation(prog, "u_fade");
+    this.uAct = gl.getUniformLocation(prog, "u_act");
 
     const quad = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
     const vao = gl.createVertexArray();
@@ -363,6 +404,7 @@ export class RedGiantScene {
     gl.uniform1f(this.uRot, rot);
     gl.uniform1f(this.uP, p);
     gl.uniform1f(this.uFade, fade);
+    gl.uniform3f(this.uAct, this.activity[0], this.activity[1], this.activity[2]);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.flush();
   }
@@ -414,6 +456,7 @@ export class RedGiantScene {
       gl.uniform1f(this.uRot, this.rot);
       gl.uniform1f(this.uP, p);
       gl.uniform1f(this.uFade, this.fade);
+      gl.uniform3f(this.uAct, this.activity[0], this.activity[1], this.activity[2]);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
     this.rafId = requestAnimationFrame(this.render);
