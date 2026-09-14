@@ -2,18 +2,25 @@ import { useCallback, useRef, useState } from "react";
 import CosmosView from "./components/CosmosView";
 import SectionPage from "./components/SectionPage";
 import BlueGiantPage from "./components/BlueGiantPage";
+import RedGiantPage from "./components/RedGiantPage";
 import MusicCapsule from "./components/MusicCapsule";
 import { music } from "./audio/music";
 import type { Cosmos, CaptureInfo } from "./universe/engine";
-import type { StarDef } from "./data/site";
+import { stars, type StarDef } from "./data/site";
 
 type Enter = { mode: "intro" | "return"; color: string };
 
+/** 仅 DEV：URL 加 ?dev=<恒星id> 直达对应板块页（用于后台 rAF 冻结环境下的截图验证，生产构建不含此路径） */
+const devSection: StarDef | null =
+  import.meta.env.DEV && typeof window !== "undefined"
+    ? (stars.find((s) => s.id === new URLSearchParams(window.location.search).get("dev")) ?? null)
+    : null;
+
 export default function App() {
   const engineRef = useRef<Cosmos | null>(null);
-  const [view, setView] = useState<"cosmos" | "section">("cosmos");
+  const [view, setView] = useState<"cosmos" | "section">(devSection ? "section" : "cosmos");
   const [enter, setEnter] = useState<Enter>({ mode: "intro", color: "#05060c" });
-  const [section, setSection] = useState<StarDef | null>(null);
+  const [section, setSection] = useState<StarDef | null>(devSection);
   /** 每次回到宇宙都重建一次引擎，保证入场动画从干净状态开始 */
   const [epoch, setEpoch] = useState(0);
 
@@ -35,13 +42,16 @@ export default function App() {
   const noop = useCallback((_info: CaptureInfo | null) => {}, []);
 
   const onBlueGiant = view === "section" && section?.id === "blue-giant";
+  const onRedGiant = view === "section" && section?.id === "red-giant";
 
   return (
     <>
       {view === "section" && section ? (
-        /** 蓝巨星走黑洞电影页，其余板块保持通用页 */
+        /** 蓝巨星走黑洞电影页，红巨星走影像画廊页，其余板块保持通用页 */
         onBlueGiant ? (
           <BlueGiantPage star={section} onBack={backToCosmos} />
+        ) : onRedGiant ? (
+          <RedGiantPage star={section} onBack={backToCosmos} />
         ) : (
           <SectionPage star={section} onBack={backToCosmos} />
         )

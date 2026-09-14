@@ -28,3 +28,6 @@ pnpm-debug.log*
 .idea/
 .DS_Store
 Thumbs.db
+
+# 原始影像素材（相机原片，不入库；转码产物在 public/影像/）
+/影像/
