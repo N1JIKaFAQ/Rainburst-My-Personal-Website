@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { music, type MusicState } from "../audio/music";
 import { audioConfig } from "../data/site";
 import { createLiquidGlassFilter } from "../utils/liquidGlass";
+import { IS_GECKO } from "../utils/gecko";
 import type { Cosmos } from "../universe/engine";
 
 interface Props {
@@ -37,10 +38,10 @@ export default function MusicCapsule({ position = "bottom", glass = "liquid", en
 
   useEffect(() => music.subscribe(setState), []);
 
-  /* ---------- 液态玻璃滤镜（liquid 模式：挂载时 + resize 防抖重建；plain 模式：纯 blur） ---------- */
+  /* ---------- 液态玻璃滤镜（liquid 模式：挂载时 + resize 防抖重建；plain 模式或 Gecko：纯 blur） ---------- */
   useEffect(() => {
     const el0 = outerRef.current;
-    if (glass === "plain") {
+    if (glass === "plain" || IS_GECKO) {
       el0?.style.setProperty("--lg-filter", "blur(8px)");
       document.getElementById("music-capsule")?.remove();
       return;

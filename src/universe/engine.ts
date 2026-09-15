@@ -12,6 +12,7 @@
  */
 
 import type { StarDef, StarKind } from "../data/site";
+import { IS_GECKO } from "../utils/gecko";
 
 export interface CaptureInfo {
   def: StarDef;
@@ -404,7 +405,8 @@ export class Cosmos {
     const rect = this.canvas.getBoundingClientRect();
     const w = Math.max(320, rect.width || window.innerWidth);
     const h = Math.max(320, rect.height || window.innerHeight);
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    // Gecko（Zen/Firefox）的 Canvas2D 填充率是 Chromium 数倍成本，DPR 上限收紧到 1.5（像素量 -44%，发光点阵肉眼无感）
+    this.dpr = Math.min(IS_GECKO ? 1.5 : 2, window.devicePixelRatio || 1);
     this.w = w;
     this.h = h;
     this.canvas.width = Math.floor(w * this.dpr);
