@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { BlackholeScene } from "../universe/blackhole";
 import SectionPage from "./SectionPage";
-import { rockCards, site, type RockCard, type StarDef } from "../data/site";
+import SPlayerPage from "./SPlayerPage";
+import { music } from "../audio/music";
+import { coverUrl, featuredAlbum, historyAlbums, pinnedAlbum, type Album } from "../data/albums";
+import { site, type StarDef } from "../data/site";
 
 interface Props {
   star: StarDef;
@@ -18,7 +21,26 @@ export default function BlueGiantPage({ star, onBack }: Props) {
 
   const [progress, setProgress] = useState(0);
   const [unsupported, setUnsupported] = useState(false);
-  const [activeCardId, setActiveCardId] = useState<string | null>(null);
+  /** 打开 SPlayer 播放器的专辑 id；null = 故事页 */
+  const [playerAlbum, setPlayerAlbum] = useState<string | null>(null);
+
+  /* DEV 调试钩子：?dev=blue-giant&finale=1 定格终局卡片；window.__bgOpen(id) 直接开播放器
+     （用于浏览器面板隐藏、rAF 冻结时的无头布局验证；生产构建剔除） */
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as { __bgOpen?: (id: string) => void }).__bgOpen = (id: string) => setPlayerAlbum(id);
+    if (new URLSearchParams(window.location.search).get("finale")) setProgress(1);
+  }, []);
+
+  /** 关播放器：若正在播队列 → 淡回板块专属曲 */
+  const closePlayer = () => {
+    setPlayerAlbum(null);
+    if (music.getState().mode === "queue") music.switchMode("dedicated");
+  };
+
+  /** 本地别名：模块级 const 在 JSX 闭包里不被 TS 收窄，本地 const 会 */
+  const feat = featuredAlbum;
+  const pin = pinnedAlbum;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -70,7 +92,9 @@ export default function BlueGiantPage({ star, onBack }: Props) {
     <div
       ref={containerRef}
       onScroll={handleScroll}
-      className="fixed inset-0 select-none overflow-x-hidden overflow-y-auto bg-[#030304] text-white"
+      className={`fixed inset-0 select-none bg-[#030304] text-white ${
+        playerAlbum ? "overflow-hidden" : "overflow-x-hidden overflow-y-auto"
+      }`}
       style={{ WebkitOverflowScrolling: "touch" }}
     >
       <div className="relative h-[500vh] w-full">
@@ -150,30 +174,33 @@ export default function BlueGiantPage({ star, onBack }: Props) {
             </div>
           </div>
 
-          {/* 终局：三张卡片沿底部一排渐次浮现（苹果发布页式），避开黑洞与上方拱弧 */}
+          {/* 终局：三张专辑卡沿底部一排渐次浮现（苹果发布页式），避开黑洞与上方拱弧 */}
           <div className="pointer-events-none absolute bottom-6 left-[5vw] right-[5vw] z-30 flex snap-x gap-3 overflow-x-auto pb-1 sm:bottom-8 sm:grid sm:grid-cols-3 sm:gap-4 sm:overflow-visible">
-            {rockCards.map((card, i) => {
-              const cp = clamp01((progress - (0.72 + i * 0.08)) / 0.1);
-              return (
-                <div
-                  key={card.id}
-                  className={`min-w-[78vw] snap-center transition-all duration-300 sm:min-w-0 ${
-                    cp > 0.01 ? "pointer-events-auto" : "pointer-events-none"
-                  }`}
-                  style={{
-                    opacity: cp,
-                    transform: `translateY(${(1 - cp) * 28}px)`,
-                    visibility: cp > 0.01 ? "visible" : "hidden",
-                  }}
-                >
-                  <GlassCard
-                    card={card}
-                    active={activeCardId === card.id}
-                    onToggle={() => setActiveCardId(activeCardId === card.id ? null : card.id)}
-                  />
-                </div>
-              );
-            })}
+            {feat && (
+              <RevealSlot cp={clamp01((progress - 0.72) / 0.1)}>
+                <AlbumCard
+                  album={feat}
+                  kicker="最近爱听"
+                  kickerEn="NOW SPINNING"
+                  accent={star.color}
+                  onOpen={() => setPlayerAlbum(feat.id)}
+                />
+              </RevealSlot>
+            )}
+            <RevealSlot cp={clamp01((progress - 0.8) / 0.1)}>
+              <HistoryCard albums={historyAlbums} accent={star.color} onOpen={(id) => setPlayerAlbum(id)} />
+            </RevealSlot>
+            {pin && (
+              <RevealSlot cp={clamp01((progress - 0.88) / 0.1)}>
+                <AlbumCard
+                  album={pin}
+                  kicker="声音玩具"
+                  kickerEn="ARCHIVE PICK"
+                  accent="#a8c9ff"
+                  onOpen={() => setPlayerAlbum(pin.id)}
+                />
+              </RevealSlot>
+            )}
           </div>
 
           {/* 右侧微型滚动指示条 */}
@@ -185,71 +212,155 @@ export default function BlueGiantPage({ star, onBack }: Props) {
           </div>
         </div>
       </div>
+
+      {/* 播放器：全屏接管（Esc / 右上角返回退出并淡回专属曲） */}
+      {playerAlbum && <SPlayerPage initialAlbumId={playerAlbum} onClose={closePlayer} />}
     </div>
   );
 }
 
-/** 苹果 / ins 极简玻璃拟态卡片 */
-function GlassCard({
-  card,
-  active,
-  onToggle,
-}: {
-  card: RockCard;
-  active: boolean;
-  onToggle: () => void;
-}) {
+/** 终局卡的浮现槽位（沿用苹果发布页的错峰公式） */
+function RevealSlot({ cp, children }: { cp: number; children: React.ReactNode }) {
   return (
     <div
-      onClick={onToggle}
-      className={`group relative cursor-pointer overflow-hidden rounded-2xl border bg-black/45 p-5 shadow-2xl backdrop-blur-2xl transition-all duration-500 ${
-        active
-          ? "border-[#8fb6ff]/50 bg-black/60"
-          : "border-white/12 hover:border-white/30 hover:bg-white/[0.05]"
+      className={`min-w-[78vw] snap-center transition-all duration-300 sm:min-w-0 ${
+        cp > 0.01 ? "pointer-events-auto" : "pointer-events-none"
       }`}
+      style={{
+        opacity: cp,
+        transform: `translateY(${(1 - cp) * 28}px)`,
+        visibility: cp > 0.01 ? "visible" : "hidden",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** 专辑卡：封面缩略 + 曲名信息 + 统计，点进 SPlayer 播放器（宇宙玻璃语言） */
+function AlbumCard({
+  album,
+  kicker,
+  kickerEn,
+  accent,
+  onOpen,
+}: {
+  album: Album;
+  kicker: string;
+  kickerEn: string;
+  accent: string;
+  onOpen: () => void;
+}) {
+  const playable = album.tracks.filter((t) => t.file).length;
+  const totalMin = Math.round(album.tracks.reduce((s, t) => s + (t.ms || 0), 0) / 60000);
+  return (
+    <button
+      onClick={onOpen}
+      className="group relative block w-full cursor-pointer overflow-hidden rounded-2xl border border-white/12 bg-black/45 p-5 text-left shadow-2xl backdrop-blur-2xl transition-all duration-500 hover:border-white/30 hover:bg-white/[0.05]"
     >
       <div
         className="pointer-events-none absolute -left-12 -top-12 h-32 w-32 rounded-full opacity-20 blur-2xl transition-opacity duration-500 group-hover:opacity-40"
-        style={{ background: card.accent }}
+        style={{ background: accent }}
       />
-
-      <div className="relative">
-        <div className="flex items-baseline justify-between">
-          <span className="font-mono text-[10px] tracking-[0.3em] text-white/35">{card.index}</span>
-          <span className="text-[9px] font-light uppercase tracking-[0.24em]" style={{ color: card.accent }}>
-            {card.category}
+      <div className="relative flex gap-4">
+        <span className="relative h-[72px] w-[72px] shrink-0 overflow-hidden rounded-lg shadow-[0_10px_28px_rgba(0,0,0,0.55)]">
+          <img src={coverUrl(album)} alt={album.title} className="h-full w-full object-cover" loading="lazy" draggable={false} />
+          {/* 封面底部的播放提示角标 */}
+          <span className="absolute inset-x-0 bottom-0 translate-y-full bg-black/65 py-[3px] text-center text-[8px] font-light uppercase tracking-[0.22em] text-white/85 backdrop-blur-sm transition-transform duration-300 group-hover:translate-y-0">
+            打开播放器
           </span>
-        </div>
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-baseline justify-between gap-2">
+            <span className="text-[9px] font-light uppercase tracking-[0.24em]" style={{ color: accent }}>
+              {kickerEn}
+            </span>
+            <span className="font-mono text-[8px] tracking-[0.16em] text-white/25">{album.year}</span>
+          </span>
+          <span className="mt-1.5 block truncate text-lg font-light tracking-wide text-white/95">{album.title}</span>
+          <span className="block truncate text-[10px] font-light text-white/40">
+            {kicker} · {album.artist}
+          </span>
+        </span>
+      </div>
+      {album.intro && (
+        <p className="relative mt-3 line-clamp-2 text-[11px] font-light leading-relaxed text-white/50">{album.intro}</p>
+      )}
+      <div className="relative mt-4 grid grid-cols-3 gap-2 border-t border-white/10 pt-3.5">
+        <span>
+          <span className="block text-[8px] font-light tracking-[0.18em] text-white/30">曲目</span>
+          <span className="mt-0.5 block font-mono text-[10px] text-white/80">{album.tracks.length} TRACKS</span>
+        </span>
+        <span>
+          <span className="block text-[8px] font-light tracking-[0.18em] text-white/30">时长</span>
+          <span className="mt-0.5 block font-mono text-[10px] text-white/80">{totalMin > 0 ? `≈${totalMin} MIN` : "—"}</span>
+        </span>
+        <span>
+          <span className="block text-[8px] font-light tracking-[0.18em] text-white/30">音频</span>
+          <span className="mt-0.5 block font-mono text-[10px]" style={{ color: playable ? "#8fb6ff" : "rgba(255,255,255,0.35)" }}>
+            {playable ? `${playable} 首可播` : "待导入"}
+          </span>
+        </span>
+      </div>
+    </button>
+  );
+}
 
-        <h3 className="mt-2.5 text-lg font-light tracking-wide text-white/95">{card.title}</h3>
-        <p className="text-[9px] font-light uppercase tracking-[0.3em] text-white/30">{card.titleEn}</p>
+/** 历史列表卡：叠放缩略墙，悬停扇形展开，点任意一张进播放器；空态说明归档规则 */
+function HistoryCard({ albums, accent, onOpen }: { albums: Album[]; accent: string; onOpen: (id: string) => void }) {
+  const [hover, setHover] = useState(false);
+  const shown = albums.slice(0, 5);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      className="group relative block w-full overflow-hidden rounded-2xl border border-white/12 bg-black/45 p-5 shadow-2xl backdrop-blur-2xl transition-all duration-500 hover:border-white/30 hover:bg-white/[0.05]"
+    >
+      <div
+        className="pointer-events-none absolute -left-12 -top-12 h-32 w-32 rounded-full opacity-20 blur-2xl transition-opacity duration-500 group-hover:opacity-40"
+        style={{ background: accent }}
+      />
+      <div className="relative flex items-baseline justify-between gap-2">
+        <span className="text-[9px] font-light uppercase tracking-[0.24em]" style={{ color: accent }}>
+          HISTORY BIN
+        </span>
+        {albums.length > 0 && (
+          <span className="font-mono text-[9px] tracking-[0.16em] text-white/35">×{albums.length}</span>
+        )}
+      </div>
+      <span className="relative mt-1.5 block text-lg font-light tracking-wide text-white/95">历史列表</span>
 
-        {/* 均衡器条 */}
-        <div className="mt-3 flex items-center gap-1">
-          {[40, 75, 55, 90, 60, 30, 85, 45, 95, 70, 50, 80].map((h, i) => (
-            <span
-              key={i}
-              className="inline-block w-1 rounded-full bg-[#8fb6ff]/40 transition-colors duration-300 group-hover:bg-[#8fb6ff]/80"
-              style={{
-                height: `${h * 0.14}px`,
-                animation: `breathe ${2 + (i % 3) * 0.5}s ease-in-out infinite alternate`,
-                animationDelay: `${i * 0.1}s`,
-              }}
-            />
-          ))}
-          <span className="ml-2 font-mono text-[8px] tracking-[0.16em] text-white/30">192kHz/24bit</span>
-        </div>
-
-        <p className="mt-3 text-[11px] font-light leading-relaxed text-white/50">{card.description}</p>
-
-        <div className="mt-4 grid grid-cols-3 gap-2 border-t border-white/10 pt-3.5">
-          {card.metrics.map((m) => (
-            <div key={m.label}>
-              <span className="block text-[8px] font-light tracking-[0.18em] text-white/30">{m.label}</span>
-              <span className="mt-0.5 block font-mono text-[10px] text-white/80">{m.value}</span>
-            </div>
-          ))}
-        </div>
+      {shown.length === 0 ? (
+        <p className="relative mt-3 text-[11px] font-light leading-relaxed text-white/40">
+          暂时空着。每次换听新专辑，上一张会自动归档到这里。
+        </p>
+      ) : (
+        <>
+          <div className="relative mt-4 flex h-[54px] items-center">
+            {shown.map((a, i) => (
+              <button
+                key={a.id}
+                onClick={() => onOpen(a.id)}
+                title={`${a.title} · ${a.artist}`}
+                className="absolute h-[54px] w-[54px] cursor-pointer overflow-hidden rounded-md shadow-[0_8px_22px_rgba(0,0,0,0.55)] ring-1 ring-white/15 transition-all duration-500 hover:z-50 hover:-translate-y-1.5"
+                style={{
+                  left: hover ? `${i * 64}px` : `${i * 20}px`,
+                  transform: `rotate(${hover ? 0 : (i - (shown.length - 1) / 2) * 4}deg)`,
+                  zIndex: i,
+                }}
+              >
+                <img src={coverUrl(a)} alt={a.title} className="h-full w-full object-cover" loading="lazy" draggable={false} />
+              </button>
+            ))}
+          </div>
+          <p className="relative mt-3 text-[10px] font-light leading-relaxed text-white/35">
+            最近归档：{shown[0].artist} — {shown[0].title}
+          </p>
+        </>
+      )}
+      <div className="relative mt-4 border-t border-white/10 pt-3.5">
+        <span className="block text-[8px] font-light tracking-[0.18em] text-white/30">换听自动归档</span>
+        <span className="mt-1 block font-mono text-[10px] text-white/60">npm run album "歌手 新专辑"</span>
       </div>
     </div>
   );

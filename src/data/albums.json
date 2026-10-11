@@ -1,0 +1,139 @@
+{
+  "featured": "精气神",
+  "history": [],
+  "pinned": "劳动之余",
+  "albums": {
+    "劳动之余": {
+      "id": "劳动之余",
+      "title": "劳动之余",
+      "artist": "Soundtoy",
+      "year": "2021",
+      "date": "2021-04-30",
+      "genres": [
+        "Rock & Roll"
+      ],
+      "cover": "albums/劳动之余.webp",
+      "accent": "#3e2288",
+      "intro": "",
+      "tracks": [
+        {
+          "n": 1,
+          "title": "爱是昂贵的",
+          "ms": 398000,
+          "file": null
+        },
+        {
+          "n": 2,
+          "title": "你的城市",
+          "ms": 359787,
+          "file": null
+        },
+        {
+          "n": 3,
+          "title": "没有人能够比我们更接近对方",
+          "ms": 370573,
+          "file": null
+        },
+        {
+          "n": 4,
+          "title": "昨夜我飞向遥远的火星",
+          "ms": 405573,
+          "file": null
+        },
+        {
+          "n": 5,
+          "title": "月上乌尤",
+          "ms": 358853,
+          "file": null
+        },
+        {
+          "n": 6,
+          "title": "清塘荷韵",
+          "ms": 320520,
+          "file": null
+        },
+        {
+          "n": 7,
+          "title": "时间之外",
+          "ms": 259224,
+          "file": null
+        },
+        {
+          "n": 8,
+          "title": "超级巨星",
+          "ms": 311211,
+          "file": null
+        }
+      ]
+    },
+    "精气神": {
+      "id": "精气神",
+      "title": "精气神",
+      "artist": "Bruce Liang",
+      "year": "2025",
+      "date": "2025-04-25",
+      "genres": [
+        "Mandopop"
+      ],
+      "cover": "albums/精气神.webp",
+      "accent": "#ffffaa",
+      "intro": "",
+      "tracks": [
+        {
+          "n": 1,
+          "title": "听你说",
+          "ms": 343239,
+          "file": null
+        },
+        {
+          "n": 2,
+          "title": "避世离俗",
+          "ms": 431523,
+          "file": null
+        },
+        {
+          "n": 3,
+          "title": "苦与乐",
+          "ms": 414180,
+          "file": null
+        },
+        {
+          "n": 4,
+          "title": "心田",
+          "ms": 457429,
+          "file": null
+        },
+        {
+          "n": 5,
+          "title": "月亮",
+          "ms": 362512,
+          "file": null
+        },
+        {
+          "n": 6,
+          "title": "精气神",
+          "ms": 359062,
+          "file": null
+        },
+        {
+          "n": 7,
+          "title": "安然无恙",
+          "ms": 326498,
+          "file": null
+        },
+        {
+          "n": 8,
+          "title": "瀑布",
+          "ms": 396134,
+          "file": null
+        },
+        {
+          "n": 9,
+          "title": "今天",
+          "ms": 169194,
+          "file": null
+        }
+      ]
+    }
+  }
+}

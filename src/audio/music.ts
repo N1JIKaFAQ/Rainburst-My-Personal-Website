@@ -1,16 +1,18 @@
 /**
  * 全站背景音乐：无 React 依赖的模块级单例（模式对齐 universe/blackhole.ts）。
  *
- * 两种播放模式：
- *  - ambient    主页随机池（globalTracks），一首播完自动换下一首
- *  - dedicated  板块专属单曲（蓝巨星 = The Great Gig in the Sky），循环不掐断
+ * 三种播放模式：
+ *  - ambient  主页随机池（globalTracks），一首播完自动换下一首
+ *  - dedicated 板块专属单曲（蓝巨星 = The Great Gig in the Sky），循环不掐断
+ *  - queue    专辑播放（SPlayer 页）：显式曲目队列，顺序/随机/单曲循环三种走法
  *
  * 浏览器自动播放策略决定音频必须等首次用户手势（pointerdown / keydown），
  * 在此之前不创建 AudioContext；手势到来时以当前模式淡入开始播放。
  */
 import { audioConfig, blueGiantTrack, globalTracks, type Track } from "../data/site";
 
-export type MusicMode = "ambient" | "dedicated";
+export type MusicMode = "ambient" | "dedicated" | "queue";
+export type QueueMode = "order" | "shuffle" | "one";
 
 export interface MusicState {
   /** 用户已交互，音频可播 */ unlocked: boolean;
@@ -18,11 +20,30 @@ export interface MusicState {
   mode: MusicMode;
   track: Track | null;
   /** 加载失败的文件名；null = 正常 */ error: string | null;
+  /** queue 模式下：队列与指针（胶囊/播放器共享同一事实源） */
+  queue: Track[] | null;
+  queueIndex: number;
+  queueMode: QueueMode;
+  /** 秒；timeupdate 驱动（~4Hz），seek 立即更新 */
+  currentTime: number;
+  duration: number;
+  /** 0..1；持久化到 localStorage */
+  volume: number;
 }
 
 type Listener = (s: MusicState) => void;
 
-const TARGET_VOLUME = audioConfig.volume;
+const VOL_KEY = "rainburst.volume";
+
+function readStoredVolume(): number {
+  try {
+    const v = Number(localStorage.getItem(VOL_KEY));
+    if (Number.isFinite(v) && v > 0 && v <= 1) return v;
+  } catch {
+    /* localStorage 不可用 → 默认音量 */
+  }
+  return audioConfig.volume;
+}
 
 class MusicManager {
   private audio: HTMLAudioElement | null = null;
@@ -37,6 +58,12 @@ class MusicManager {
     mode: "ambient",
     track: null,
     error: null,
+    queue: null,
+    queueIndex: 0,
+    queueMode: "order",
+    currentTime: 0,
+    duration: 0,
+    volume: readStoredVolume(),
   };
   private listeners = new Set<Listener>();
   private fadeRaf = 0;
@@ -48,7 +75,7 @@ class MusicManager {
   private lastAmbient: Track | null = null;
 
   /** 待解锁后执行的模式切换（进页早于首次手势时暂存） */
-  private pending: { mode: MusicMode; track: Track } | null = null;
+  private pending: { mode: MusicMode; track: Track; queue?: Track[]; queueIndex?: number } | null = null;
 
   constructor() {
     this.pool = this.shuffled(globalTracks);
@@ -86,7 +113,13 @@ class MusicManager {
     };
     this.pending = null;
     this.ensureNodes();
-    this.emit({ unlocked: true, mode: wanted.mode, track: wanted.track });
+    this.emit({
+      unlocked: true,
+      mode: wanted.mode,
+      track: wanted.track,
+      queue: wanted.queue ?? null,
+      queueIndex: wanted.queueIndex ?? 0,
+    });
     this.load(wanted.track, wanted.mode);
     this.play();
   }
@@ -99,6 +132,12 @@ class MusicManager {
     audio.addEventListener("ended", () => this.onEnded());
     audio.addEventListener("error", () => {
       this.emit({ error: this.state.track?.file ?? "未知文件", playing: false });
+    });
+    audio.addEventListener("timeupdate", () => {
+      this.emit({ currentTime: audio.currentTime, duration: audio.duration || 0 });
+    });
+    audio.addEventListener("loadedmetadata", () => {
+      this.emit({ duration: audio.duration || 0, currentTime: 0 });
     });
     this.audio = audio;
 
@@ -122,16 +161,17 @@ class MusicManager {
 
   /* ---------------- 模式切换 ---------------- */
 
-  /** 页面切换入口：ambient ↔ dedicated，带淡出淡入 */
-  switchMode(mode: MusicMode) {
-    if (mode === this.state.mode && this.state.track) return;
+  /** 页面切换入口：ambient ↔ dedicated（离开 queue 时也走这里复位） */
+  switchMode(mode: Exclude<MusicMode, "queue">) {
+    const sameQueue = this.state.mode !== "queue";
+    if (mode === this.state.mode && this.state.track && sameQueue) return;
     if (!this.state.unlocked) {
       // 还没解锁：记住目标模式，首次手势直接以它开播
       this.pending =
         mode === "dedicated"
           ? { mode, track: blueGiantTrack }
           : { mode, track: this.pool[this.poolIdx++ % this.pool.length] };
-      this.emit({ mode, track: this.pending.track });
+      this.emit({ mode, track: this.pending.track, queue: null, queueIndex: 0 });
       return;
     }
     const track =
@@ -142,7 +182,7 @@ class MusicManager {
       this.lastAmbient = this.state.track;
     }
     this.fadeTo(0, 500, () => {
-      this.emit({ mode, track });
+      this.emit({ mode, track, queue: null, queueIndex: 0 });
       this.load(track, mode);
       this.play();
     });
@@ -166,13 +206,94 @@ class MusicManager {
     }
   }
 
-  /** ambient 播完自动换下一首；dedicated 从头续播 */
+  /** ambient 换下一首；dedicated 从头续播；queue 按队列模式推进 */
   private onEnded() {
+    if (this.state.mode === "queue" && this.state.queue) {
+      if (this.state.queueMode === "one") {
+        this.load(this.state.track!, "queue");
+        this.play();
+        return;
+      }
+      const q = this.state.queue;
+      const nextIdx =
+        this.state.queueMode === "shuffle"
+          ? q.length > 1
+            ? (() => {
+                let i = this.state.queueIndex;
+                while (i === this.state.queueIndex) i = Math.floor(Math.random() * q.length);
+                return i;
+              })()
+            : this.state.queueIndex
+          : (this.state.queueIndex + 1) % q.length;
+      this.playAt(nextIdx);
+      return;
+    }
     const track = this.state.mode === "ambient" ? this.pickAmbient() : this.state.track;
     if (!track) return;
     this.emit({ track });
     this.load(track, this.state.mode);
     this.play();
+  }
+
+  /* ---------------- 专辑队列播放（SPlayer 页） ---------------- */
+
+  /** 以显式队列开播（曲目 file 为空的项由调用方过滤或在 playAt 时报错降级） */
+  playQueue(tracks: Track[], index = 0) {
+    if (!tracks.length) return;
+    if (!this.state.unlocked) {
+      this.pending = { mode: "queue", track: tracks[index], queue: tracks, queueIndex: index };
+      this.emit({ mode: "queue", track: tracks[index], queue: tracks, queueIndex: index });
+      return;
+    }
+    this.fadeTo(0, 300, () => {
+      this.emit({ mode: "queue", queue: tracks, queueIndex: index });
+      this.playAt(index);
+    });
+  }
+
+  /** 队列内切歌（含循环边界） */
+  playAt(index: number) {
+    const q = this.state.queue;
+    if (!q || !q.length) return;
+    const i = ((index % q.length) + q.length) % q.length;
+    const track = q[i];
+    this.fadeTo(0, 250, () => {
+      this.emit({ queueIndex: i, track });
+      this.load(track, "queue");
+      this.play();
+    });
+  }
+
+  next() {
+    if (this.state.mode === "queue") this.playAt(this.state.queueIndex + 1);
+  }
+
+  prev() {
+    if (this.state.mode === "queue") this.playAt(this.state.queueIndex - 1);
+  }
+
+  /** 拖动进度条 */
+  seek(sec: number) {
+    const audio = this.audio;
+    if (!audio || !Number.isFinite(audio.duration)) return;
+    audio.currentTime = Math.max(0, Math.min(sec, audio.duration - 0.05));
+    this.emit({ currentTime: audio.currentTime });
+  }
+
+  /** 用户音量 0..1（即时生效 + 持久化，作为后续淡入目标） */
+  setVolume(v: number) {
+    const vol = Math.max(0, Math.min(1, v));
+    this.emit({ volume: vol });
+    if (this.audio && (this.state.playing || vol === 0)) this.audio.volume = vol;
+    try {
+      localStorage.setItem(VOL_KEY, String(vol));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  setQueueMode(mode: QueueMode) {
+    this.emit({ queueMode: mode });
   }
 
   private pickAmbient(): Track {
@@ -207,7 +328,7 @@ class MusicManager {
     if (!audio.src.endsWith(encodeURI(track.file))) audio.src = url;
     audio.loop = mode === "dedicated";
     audio.currentTime = 0;
-    this.emit({ error: null });
+    this.emit({ error: null, currentTime: 0, duration: 0 });
   }
 
   private play() {
@@ -220,7 +341,7 @@ class MusicManager {
       .catch(() => {
         /* 手势链断裂等极端情况：保持可点，不报错 */
       });
-    this.fadeTo(TARGET_VOLUME, 2200);
+    this.fadeTo(this.state.volume, 2200);
   }
 
   private fadeTo(target: number, ms: number, done?: () => void) {
