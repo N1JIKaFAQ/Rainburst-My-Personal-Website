@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BlackholeScene } from "../universe/blackhole";
 import SectionPage from "./SectionPage";
-import SPlayerPage from "./SPlayerPage";
+import AlbumNowPlaying from "./AlbumNowPlaying";
 import { music } from "../audio/music";
 import { coverUrl, featuredAlbum, historyAlbums, pinnedAlbum, type Album } from "../data/albums";
 import { site, type StarDef } from "../data/site";
@@ -21,20 +21,20 @@ export default function BlueGiantPage({ star, onBack }: Props) {
 
   const [progress, setProgress] = useState(0);
   const [unsupported, setUnsupported] = useState(false);
-  /** 打开 SPlayer 播放器的专辑 id；null = 故事页 */
-  const [playerAlbum, setPlayerAlbum] = useState<string | null>(null);
+  /** 播放放大页：专辑 id + 打开瞬间卡片封面矩形（FLIP 起点）；null = 故事页 */
+  const [player, setPlayer] = useState<{ id: string; rect?: { x: number; y: number; width: number; height: number } } | null>(null);
 
-  /* DEV 调试钩子：?dev=blue-giant&finale=1 定格终局卡片；window.__bgOpen(id) 直接开播放器
+  /* DEV 调试钩子：?dev=blue-giant&finale=1 定格终局卡片；window.__bgOpen(id) 直接开播放页
      （用于浏览器面板隐藏、rAF 冻结时的无头布局验证；生产构建剔除） */
   useEffect(() => {
     if (!import.meta.env.DEV) return;
-    (window as unknown as { __bgOpen?: (id: string) => void }).__bgOpen = (id: string) => setPlayerAlbum(id);
+    (window as unknown as { __bgOpen?: (id: string) => void }).__bgOpen = (id: string) => setPlayer({ id });
     if (new URLSearchParams(window.location.search).get("finale")) setProgress(1);
   }, []);
 
-  /** 关播放器：若正在播队列 → 淡回板块专属曲 */
+  /** 关播放页：若正在播队列 → 淡回板块专属曲 */
   const closePlayer = () => {
-    setPlayerAlbum(null);
+    setPlayer(null);
     if (music.getState().mode === "queue") music.switchMode("dedicated");
   };
 
@@ -93,7 +93,7 @@ export default function BlueGiantPage({ star, onBack }: Props) {
       ref={containerRef}
       onScroll={handleScroll}
       className={`fixed inset-0 select-none bg-[#030304] text-white ${
-        playerAlbum ? "overflow-hidden" : "overflow-x-hidden overflow-y-auto"
+        player ? "overflow-hidden" : "overflow-x-hidden overflow-y-auto"
       }`}
       style={{ WebkitOverflowScrolling: "touch" }}
     >
@@ -183,12 +183,12 @@ export default function BlueGiantPage({ star, onBack }: Props) {
                   kicker="最近爱听"
                   kickerEn="NOW SPINNING"
                   accent={star.color}
-                  onOpen={() => setPlayerAlbum(feat.id)}
+                  onOpen={(r) => setPlayer({ id: feat.id, rect: r })}
                 />
               </RevealSlot>
             )}
             <RevealSlot cp={clamp01((progress - 0.8) / 0.1)}>
-              <HistoryCard albums={historyAlbums} accent={star.color} onOpen={(id) => setPlayerAlbum(id)} />
+              <HistoryCard albums={historyAlbums} accent={star.color} onOpen={(id, r) => setPlayer({ id, rect: r })} />
             </RevealSlot>
             {pin && (
               <RevealSlot cp={clamp01((progress - 0.88) / 0.1)}>
@@ -197,7 +197,7 @@ export default function BlueGiantPage({ star, onBack }: Props) {
                   kicker="声音玩具"
                   kickerEn="ARCHIVE PICK"
                   accent="#a8c9ff"
-                  onOpen={() => setPlayerAlbum(pin.id)}
+                  onOpen={(r) => setPlayer({ id: pin.id, rect: r })}
                 />
               </RevealSlot>
             )}
@@ -214,7 +214,7 @@ export default function BlueGiantPage({ star, onBack }: Props) {
       </div>
 
       {/* 播放器：全屏接管（Esc / 右上角返回退出并淡回专属曲） */}
-      {playerAlbum && <SPlayerPage initialAlbumId={playerAlbum} onClose={closePlayer} />}
+      {player && <AlbumNowPlaying initialAlbumId={player.id} originRect={player.rect} onClose={closePlayer} />}
     </div>
   );
 }
@@ -249,13 +249,16 @@ function AlbumCard({
   kicker: string;
   kickerEn: string;
   accent: string;
-  onOpen: () => void;
+  onOpen: (rect?: { x: number; y: number; width: number; height: number }) => void;
 }) {
   const playable = album.tracks.filter((t) => t.file).length;
   const totalMin = Math.round(album.tracks.reduce((s, t) => s + (t.ms || 0), 0) / 60000);
   return (
     <button
-      onClick={onOpen}
+      onClick={(e) => {
+        const img = e.currentTarget.querySelector("img");
+        onOpen(img?.getBoundingClientRect());
+      }}
       className="group relative block w-full cursor-pointer overflow-hidden rounded-2xl border border-white/12 bg-black/45 p-5 text-left shadow-2xl backdrop-blur-2xl transition-all duration-500 hover:border-white/30 hover:bg-white/[0.05]"
     >
       <div
@@ -307,7 +310,7 @@ function AlbumCard({
 }
 
 /** 历史列表卡：叠放缩略墙，悬停扇形展开，点任意一张进播放器；空态说明归档规则 */
-function HistoryCard({ albums, accent, onOpen }: { albums: Album[]; accent: string; onOpen: (id: string) => void }) {
+function HistoryCard({ albums, accent, onOpen }: { albums: Album[]; accent: string; onOpen: (id: string, rect?: { x: number; y: number; width: number; height: number }) => void }) {
   const [hover, setHover] = useState(false);
   const shown = albums.slice(0, 5);
   return (
@@ -340,7 +343,10 @@ function HistoryCard({ albums, accent, onOpen }: { albums: Album[]; accent: stri
             {shown.map((a, i) => (
               <button
                 key={a.id}
-                onClick={() => onOpen(a.id)}
+                onClick={(e) => {
+                  const img = e.currentTarget.querySelector("img");
+                  onOpen(a.id, img?.getBoundingClientRect());
+                }}
                 title={`${a.title} · ${a.artist}`}
                 className="absolute h-[54px] w-[54px] cursor-pointer overflow-hidden rounded-md shadow-[0_8px_22px_rgba(0,0,0,0.55)] ring-1 ring-white/15 transition-all duration-500 hover:z-50 hover:-translate-y-1.5"
                 style={{
@@ -360,7 +366,7 @@ function HistoryCard({ albums, accent, onOpen }: { albums: Album[]; accent: stri
       )}
       <div className="relative mt-4 border-t border-white/10 pt-3.5">
         <span className="block text-[8px] font-light tracking-[0.18em] text-white/30">换听自动归档</span>
-        <span className="mt-1 block font-mono text-[10px] text-white/60">npm run album "歌手 新专辑"</span>
+        <span className="mt-1 block font-mono text-[10px] text-white/60">npm run album -- "歌手 新专辑" --ncm</span>
       </div>
     </div>
   );

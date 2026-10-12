@@ -145,7 +145,8 @@ export interface Track {
   /** 中文/主标题，胶囊里滚动展示 */ title: string;
   /** 英文副题 */ titleEn: string;
   /** 艺术家 */ artist: string;
-  /** 相对 public/Music/ 的文件路径 */ file: string;
+  /** 相对 public/Music/ 的文件路径（本地曲目） */ file?: string;
+  /** 网络直链（网易云播放走这条，优先级高于 file；跨域故走独立 audio 通道） */ url?: string;
 }
 
 /** 主页 ambient 曲池：随机挑一首播放 */

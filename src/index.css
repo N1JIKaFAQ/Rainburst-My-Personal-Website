@@ -53,6 +53,17 @@ body {
   }
 }
 
+/* 播放中当前曲目的小跳动柱 */
+@keyframes eqbar {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
 @keyframes fade-up {
   from {
     opacity: 0;

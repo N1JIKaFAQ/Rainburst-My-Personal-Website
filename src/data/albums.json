@@ -6,132 +6,132 @@
     "劳动之余": {
       "id": "劳动之余",
       "title": "劳动之余",
-      "artist": "Soundtoy",
+      "artist": "声音玩具",
       "year": "2021",
       "date": "2021-04-30",
-      "genres": [
-        "Rock & Roll"
-      ],
+      "genres": [],
       "cover": "albums/劳动之余.webp",
-      "accent": "#3e2288",
+      "accent": "#422483",
       "intro": "",
+      "ncmId": 126677649,
+      "artistId": 12711,
       "tracks": [
         {
           "n": 1,
           "title": "爱是昂贵的",
           "ms": 398000,
-          "file": null
+          "neteaseId": 1840927022
         },
         {
           "n": 2,
           "title": "你的城市",
-          "ms": 359787,
-          "file": null
+          "ms": 359786,
+          "neteaseId": 551338024
         },
         {
           "n": 3,
           "title": "没有人能够比我们更接近对方",
           "ms": 370573,
-          "file": null
+          "neteaseId": 1468592465
         },
         {
           "n": 4,
           "title": "昨夜我飞向遥远的火星",
           "ms": 405573,
-          "file": null
+          "neteaseId": 1840928845
         },
         {
           "n": 5,
           "title": "月上乌尤",
           "ms": 358853,
-          "file": null
+          "neteaseId": 1840927023
         },
         {
           "n": 6,
           "title": "清塘荷韵",
           "ms": 320520,
-          "file": null
+          "neteaseId": 1840927024
         },
         {
           "n": 7,
           "title": "时间之外",
           "ms": 259224,
-          "file": null
+          "neteaseId": 1497742874
         },
         {
           "n": 8,
           "title": "超级巨星",
           "ms": 311211,
-          "file": null
+          "neteaseId": 1472573863
         }
       ]
     },
     "精气神": {
       "id": "精气神",
       "title": "精气神",
-      "artist": "Bruce Liang",
+      "artist": "梁博",
       "year": "2025",
-      "date": "2025-04-25",
-      "genres": [
-        "Mandopop"
-      ],
+      "date": "2025-04-24",
+      "genres": [],
       "cover": "albums/精气神.webp",
-      "accent": "#ffffaa",
+      "accent": "#ffffb0",
       "intro": "",
+      "ncmId": 270138373,
+      "artistId": 166010,
       "tracks": [
         {
           "n": 1,
           "title": "听你说",
           "ms": 343239,
-          "file": null
+          "neteaseId": 2698803739
         },
         {
           "n": 2,
           "title": "避世离俗",
-          "ms": 431523,
-          "file": null
+          "ms": 431522,
+          "neteaseId": 2698803740
         },
         {
           "n": 3,
           "title": "苦与乐",
-          "ms": 414180,
-          "file": null
+          "ms": 414179,
+          "neteaseId": 2698807241
         },
         {
           "n": 4,
           "title": "心田",
           "ms": 457429,
-          "file": null
+          "neteaseId": 2698803741
         },
         {
           "n": 5,
           "title": "月亮",
-          "ms": 362512,
-          "file": null
+          "ms": 362511,
+          "neteaseId": 2698807242
         },
         {
           "n": 6,
           "title": "精气神",
-          "ms": 359062,
-          "file": null
+          "ms": 359061,
+          "neteaseId": 2698807243
         },
         {
           "n": 7,
           "title": "安然无恙",
-          "ms": 326498,
-          "file": null
+          "ms": 326497,
+          "neteaseId": 2698807244
         },
         {
           "n": 8,
           "title": "瀑布",
           "ms": 396134,
-          "file": null
+          "neteaseId": 2698803742
         },
         {
           "n": 9,
           "title": "今天",
           "ms": 169194,
-          "file": null
+          "neteaseId": 2698807245
         }
       ]
     }

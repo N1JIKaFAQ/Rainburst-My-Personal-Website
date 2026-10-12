@@ -4,7 +4,14 @@
  * 三种播放模式：
  *  - ambient  主页随机池（globalTracks），一首播完自动换下一首
  *  - dedicated 板块专属单曲（蓝巨星 = The Great Gig in the Sky），循环不掐断
- *  - queue    专辑播放（SPlayer 页）：显式曲目队列，顺序/随机/单曲循环三种走法
+ *  - queue    专辑播放（网易云直链）：显式曲目队列，顺序/随机/单曲循环
+ *
+ * 双通道 audio：
+ *  - 本地曲目（Track.file）走主元素，串 WebAudio analyser → 胶囊频谱有信号；
+ *  - 网络直链（Track.url，如网易云 CDN）走独立元素——跨域音频一旦被
+ *    createMediaElementSource 接管会因 CORS 污染输出静音，所以直链绝不进频谱图
+ *    （代价：直链播放时胶囊频谱呈低位，属预期）。
+ *  - 直链会过期（分钟级）：error 时通过 urlRefresher 回调换新链接自动续播一次。
  *
  * 浏览器自动播放策略决定音频必须等首次用户手势（pointerdown / keydown），
  * 在此之前不创建 AudioContext；手势到来时以当前模式淡入开始播放。
@@ -19,8 +26,8 @@ export interface MusicState {
   playing: boolean;
   mode: MusicMode;
   track: Track | null;
-  /** 加载失败的文件名；null = 正常 */ error: string | null;
-  /** queue 模式下：队列与指针（胶囊/播放器共享同一事实源） */
+  /** 加载失败的曲目名；null = 正常 */ error: string | null;
+  /** queue 模式下：队列与指针（胶囊/播放页共享同一事实源） */
   queue: Track[] | null;
   queueIndex: number;
   queueMode: QueueMode;
@@ -47,10 +54,14 @@ function readStoredVolume(): number {
 
 class MusicManager {
   private audio: HTMLAudioElement | null = null;
+  private audioX: HTMLAudioElement | null = null;
   private ctx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private freq: Uint8Array<ArrayBuffer> | null = null;
   private spectrum: Float32Array = new Float32Array(1024);
+  /** 直链过期时的换新链接回调（由播放页注入：重新请求 song/url） */
+  private urlRefresher: ((t: Track) => Promise<string | null>) | null = null;
+  private retrying = false;
 
   private state: MusicState = {
     unlocked: false,
@@ -131,12 +142,14 @@ class MusicManager {
     audio.volume = 0;
     audio.addEventListener("ended", () => this.onEnded());
     audio.addEventListener("error", () => {
-      this.emit({ error: this.state.track?.file ?? "未知文件", playing: false });
+      this.emit({ error: this.state.track?.title ?? this.state.track?.file ?? "未知文件", playing: false });
     });
     audio.addEventListener("timeupdate", () => {
+      if (this.currentEl() !== audio) return;
       this.emit({ currentTime: audio.currentTime, duration: audio.duration || 0 });
     });
     audio.addEventListener("loadedmetadata", () => {
+      if (this.currentEl() !== audio) return;
       this.emit({ duration: audio.duration || 0, currentTime: 0 });
     });
     this.audio = audio;
@@ -157,6 +170,57 @@ class MusicManager {
       // 无 WebAudio 也能出声，只是频谱层退化为静态
       this.analyser = null;
     }
+  }
+
+  /** 直链通道：普通 Audio，绝不接进 WebAudio 图（跨域直链被 analyser 接管会静音） */
+  private ensureDirect() {
+    if (this.audioX) return;
+    const a = new Audio();
+    a.preload = "metadata";
+    a.volume = 0;
+    a.addEventListener("ended", () => this.onEnded());
+    a.addEventListener("error", () => void this.onDirectError());
+    a.addEventListener("timeupdate", () => {
+      if (this.currentEl() !== a) return;
+      this.emit({ currentTime: a.currentTime, duration: a.duration || 0 });
+    });
+    a.addEventListener("loadedmetadata", () => {
+      if (this.currentEl() !== a) return;
+      this.emit({ duration: a.duration || 0, currentTime: 0 });
+    });
+    this.audioX = a;
+  }
+
+  /** 当前曲目对应的播放元素 */
+  private currentEl(): HTMLAudioElement | null {
+    return this.state.track?.url ? this.audioX : this.audio;
+  }
+
+  /** 播放页注入：直链过期时如何换新链接（返回 null = 放弃） */
+  setUrlRefresher(fn: ((t: Track) => Promise<string | null>) | null) {
+    this.urlRefresher = fn;
+  }
+
+  private async onDirectError() {
+    const t = this.state.track;
+    if (!t?.url) return;
+    if (this.urlRefresher && !this.retrying) {
+      this.retrying = true;
+      try {
+        const fresh = await this.urlRefresher(t);
+        this.retrying = false;
+        if (fresh && this.state.track === t) {
+          const nt = { ...t, url: fresh };
+          this.emit({ track: nt });
+          this.load(nt, "queue");
+          this.play();
+          return;
+        }
+      } catch {
+        this.retrying = false;
+      }
+    }
+    this.emit({ error: t.title ?? "播放失败", playing: false });
   }
 
   /* ---------------- 模式切换 ---------------- */
@@ -194,7 +258,7 @@ class MusicManager {
       this.unlock();
       return;
     }
-    const audio = this.audio;
+    const audio = this.currentEl();
     if (!audio || !this.state.track) return;
     if (this.state.playing) {
       audio.pause();
@@ -235,9 +299,9 @@ class MusicManager {
     this.play();
   }
 
-  /* ---------------- 专辑队列播放（SPlayer 页） ---------------- */
+  /* ---------------- 专辑队列播放（播放放大页） ---------------- */
 
-  /** 以显式队列开播（曲目 file 为空的项由调用方过滤或在 playAt 时报错降级） */
+  /** 以显式队列开播（条目可为本地 file 或直链 url） */
   playQueue(tracks: Track[], index = 0) {
     if (!tracks.length) return;
     if (!this.state.unlocked) {
@@ -274,7 +338,7 @@ class MusicManager {
 
   /** 拖动进度条 */
   seek(sec: number) {
-    const audio = this.audio;
+    const audio = this.currentEl();
     if (!audio || !Number.isFinite(audio.duration)) return;
     audio.currentTime = Math.max(0, Math.min(sec, audio.duration - 0.05));
     this.emit({ currentTime: audio.currentTime });
@@ -284,7 +348,9 @@ class MusicManager {
   setVolume(v: number) {
     const vol = Math.max(0, Math.min(1, v));
     this.emit({ volume: vol });
-    if (this.audio && (this.state.playing || vol === 0)) this.audio.volume = vol;
+    for (const a of [this.audio, this.audioX]) {
+      if (a && (this.state.playing || vol === 0)) a.volume = vol;
+    }
     try {
       localStorage.setItem(VOL_KEY, String(vol));
     } catch {
@@ -322,17 +388,28 @@ class MusicManager {
   /* ---------------- 播放内核 ---------------- */
 
   private load(track: Track, mode: MusicMode) {
-    const audio = this.audio;
-    if (!audio) return;
-    const url = `./Music/${encodeURI(track.file)}`;
-    if (!audio.src.endsWith(encodeURI(track.file))) audio.src = url;
-    audio.loop = mode === "dedicated";
-    audio.currentTime = 0;
+    if (track.url) {
+      this.ensureDirect();
+      this.audio?.pause();
+      const a = this.audioX!;
+      if (a.src !== track.url) a.src = track.url;
+      a.loop = false;
+      a.currentTime = 0;
+    } else {
+      this.ensureNodes();
+      this.audioX?.pause();
+      const a = this.audio!;
+      const file = track.file ?? "";
+      const url = `./Music/${encodeURI(file)}`;
+      if (!a.src.endsWith(encodeURI(file))) a.src = url;
+      a.loop = mode === "dedicated";
+      a.currentTime = 0;
+    }
     this.emit({ error: null, currentTime: 0, duration: 0 });
   }
 
   private play() {
-    const audio = this.audio;
+    const audio = this.currentEl();
     if (!audio || !this.state.track) return;
     void this.ctx?.resume();
     audio
@@ -345,7 +422,7 @@ class MusicManager {
   }
 
   private fadeTo(target: number, ms: number, done?: () => void) {
-    const audio = this.audio;
+    const audio = this.currentEl();
     if (!audio) {
       done?.();
       return;

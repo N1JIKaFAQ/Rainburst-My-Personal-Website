@@ -95,6 +95,45 @@ selftest/                 # CPU 着色器参考实现 + 零依赖自检脚本
 
 GitHub 推送到 `main` → Cloudflare Pages 自动构建（Build command `npm run build`，输出目录 `dist`）→ 自定义域名 <https://rainburst.cc>。
 
+## 专辑播放服务部署（网易云 API）
+
+「摇滚」板块的专辑播放页走访客**本人网易云账号扫码登录**后播放，本站不保存任何账号、也不托管音频文件。它依赖一个自部署的 [NeteaseCloudMusicApiEnhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced)（MIT，无授权门槛，开箱开 CORS）。
+
+### 一键部署（任选其一）
+
+**Docker（推荐，最省事）**
+```bash
+docker run -d --restart unless-stopped -p 16641:16641 moefurina/ncm-api:latest
+# 服务在 http://<你的服务器IP>:16641 起来
+```
+
+**Node 手动跑（需 Node ≥ 22）**
+```bash
+npm i -g @neteasecloudmusicapienhanced/api
+PORT=16641 npx @neteasecloudmusicapienhanced/api   # 或 node -e "require('@neteasecloudmusicapienhanced/api').server.start()"
+```
+
+**PaaS（Railway / Zeabur / 自己的 VPS + PM2）**
+仓库根有 `Dockerfile`，任何支持 Docker 的平台一键部署即可，暴露端口默认 16641。
+
+### 接到站点
+1. 把服务地址（要带 `https://`，结尾不带斜杠）填进 `src/netease/config.ts` 顶部的 `NCM_BASE`；
+2. 本地联调可先不写死：在浏览器控制台执行 `localStorage.setItem('rainburst.ncm-base','https://你的地址')` 即时生效；
+3. `npm run build` → 提交 → Cloudflare 自动上线。
+
+### 灌入 / 换听专辑
+```bash
+# 新专辑进「最近爱听」，原「最近爱听」自动归档进「历史列表」
+NCM_API=https://你的地址 npm run album -- "梁博 精气神" --ncm
+# 灌进第三张固定卡（不参与轮换）
+NCM_API=https://你的地址 npm run album -- "声音玩具 劳动之余" --ncm --pin
+# 查看各专辑接入状态
+npm run album -- --checklist
+```
+一句话专辑介绍在 `src/data/albums.json` 的 `intro` 字段手改，重跑脚本会保留。
+
+> 说明：音频链接由网易云 CDN 直发、约 20 分钟过期，播放器会在过期时自动重新取链；直链走独立 audio 通道（跨域音频若接进 WebAudio 频谱图会被浏览器静音），所以播放专辑时底部音乐胶囊的频谱会呈低位，属正常。
+
 ---
 
 ## 版权

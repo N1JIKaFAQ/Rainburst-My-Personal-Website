@@ -7,10 +7,12 @@ import raw from "./albums.json";
 export interface AlbumTrack {
   n: number;
   title: string;
-  /** 毫秒；0 = 未知（等 audio metadata 回填） */
+  /** 毫秒；0 = 未知 */
   ms: number;
-  /** 相对 public/Music/ 的文件路径；null = 媒体未导入（灰色兑底） */
-  file: string | null;
+  /** 网易云歌曲 id（接入后） */
+  neteaseId?: number;
+  /** 历史遗留（本地挂载已退役）：保留可选以免旧数据报错 */
+  file?: string | null;
 }
 
 export interface Album {
@@ -20,11 +22,15 @@ export interface Album {
   year: string;
   date: string;
   genres: string[];
-  /** 相对 public/ 的封面路径（albums/*.webp） */
+  /** 相对 public/ 的封面路径（albums/*.webp），或以 http(s) 开头的网易云封面 */
   cover: string;
-  /** 封面取色主色，播放器点缀色 */
+  /** 封面取色主色，播放页点缀色 */
   accent: string;
   intro: string;
+  /** 网易云专辑 id（有则可播） */
+  ncmId?: number;
+  /** 网易云艺术家 id（专辑组用） */
+  artistId?: number;
   tracks: AlbumTrack[];
 }
 
@@ -40,7 +46,7 @@ const db = raw as AlbumsDb;
 export const featuredAlbum: Album | null = db.featured ? (db.albums[db.featured] ?? null) : null;
 export const pinnedAlbum: Album | null = db.pinned ? (db.albums[db.pinned] ?? null) : null;
 export const historyAlbums: Album[] = db.history.map((id) => db.albums[id]).filter(Boolean);
-/** 全部专辑（侧栏"专辑即歌单"列表用），featured → pinned → history 顺序 */
+/** 全部专辑（featured → pinned → history 顺序） */
 export const allAlbums: Album[] = [db.featured, db.pinned, ...db.history]
   .filter((v): v is string => !!v)
   .map((id) => db.albums[id])
@@ -48,23 +54,9 @@ export const allAlbums: Album[] = [db.featured, db.pinned, ...db.history]
 
 export const getAlbum = (id: string | null | undefined): Album | null => (id ? (db.albums[id] ?? null) : null);
 
-export const totalAlbumCount = allAlbums.length;
-export const playableTrackCount = allAlbums.reduce((s, a) => s + a.tracks.filter((t) => t.file).length, 0);
+/** 封面 URL：本地图加相对前缀并编码；网易云外链原样透传 */
+export const coverUrl = (al: Album) =>
+  /^https?:\/\//i.test(al.cover) ? al.cover : `./${encodeURI(al.cover)}`;
 
-/* ---------------- 运行时 URL ---------------- */
-
-export const coverUrl = (al: Album) => `./${encodeURI(al.cover)}`;
-export const audioUrl = (file: string) => `./Music/${encodeURI(file)}`;
-
-/** 专辑 → music.ts 的 Track 队列（只包含有文件的曲目） */
-export interface QueueTrack {
-  title: string;
-  titleEn: string;
-  artist: string;
-  file: string;
-}
-export function playableQueue(al: Album): QueueTrack[] {
-  return al.tracks
-    .filter((t): t is AlbumTrack & { file: string } => !!t.file)
-    .map((t) => ({ title: t.title, titleEn: "", artist: al.artist, file: t.file }));
-}
+/** 是否已接入网易云（决定播放页是真实曲目还是 iTunes 兜底灰态） */
+export const isLinkedToNcm = (al: Album | null | undefined): boolean => !!al?.ncmId;
